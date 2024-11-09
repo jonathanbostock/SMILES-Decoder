@@ -14,7 +14,7 @@ def main():
     )
 
     dataloader = get_dataloader(
-        csv_path="data/allmollgen_frag_smiles_train.csv",
+        csv_path="data/allmolgen_pretrain_data_train.csv",
         tokenizer=SMILESTokenizer(),
         batch_size=32,
         shuffle=True,

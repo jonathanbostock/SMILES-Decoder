@@ -13,6 +13,8 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
         Tokenizer for SMILES strings
         """
         # Initialize parent class
+        self.vocab = {}
+
         super().__init__(
             pad_token="<|pad|>",
             bos_token="<|bos|>", 
@@ -141,7 +143,9 @@ class _SMILESDataset(torch.utils.data.Dataset):
             tokenizer: Tokenizer to use for encoding SMILES strings
             max_length: Maximum sequence length (will pad/truncate)
         """
-        self.data = pd.read_csv(csv_path)
+        self.data = pd.read_csv(csv_path,
+                                header=0)
+        self.data.columns = ['SMILES']
         self.tokenizer = tokenizer
         self.max_length = max_length
         
@@ -150,14 +154,10 @@ class _SMILESDataset(torch.utils.data.Dataset):
         
     def __getitem__(self, idx):
         smiles = self.data.iloc[idx]['SMILES']
-        product = self.data.iloc[idx]['Product']
-        
-        # Combine with special tokens
-        combined = smiles + "<|split|>" + product
         
         # Tokenize
         encoding = self.tokenizer.encode(
-            combined,
+            smiles,
             max_length=self.max_length,
             padding='max_length',
             truncation=True,
