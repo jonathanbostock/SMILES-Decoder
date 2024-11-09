@@ -7,39 +7,46 @@ import pandas as pd
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-class SMILESTokenizer:
+class SMILESTokenizer(transformers.PreTrainedTokenizer):
     def __init__(self):
         """
         Tokenizer for SMILES strings
         """
+        # Initialize parent class
+        super().__init__(
+            pad_token="<|pad|>",
+            bos_token="<|bos|>", 
+            eos_token="<|eot|>",
+            model_max_length=512
+        )
+        
         # Load the vocabulary from file
-        with open("allmollgen_frag_smiles_vocab.txt", "r") as f:
+        with open("allmolgen_frag_smiles_vocab.txt", "r") as f:
             vocab = f.read().splitlines()
         
         # Add special tokens at the start
         special_tokens = ["<|pad|>", "<|bos|>", "<|split|>", "<|eot|>"]
         full_vocab = special_tokens + vocab
         
-        # Create base tokenizer
-        self.tokenizer = transformers.PreTrainedTokenizerFast(
-            vocab=full_vocab,
-            pad_token="<|pad|>",
-            bos_token="<|bos|>",
-            eos_token="<|eot|>",
-            additional_special_tokens=["<|split|>"],
-            model_max_length=512
-        )
-    
-    def tokenize(self, text):
-        # Tokenize the input text
-        tokens = self.tokenizer.tokenize(text)
+        # Create vocab dictionaries
+        self.vocab = {token: i for i, token in enumerate(full_vocab)}
+        self.ids_to_tokens = {i: token for token, i in self.vocab.items()}
+
+    def get_vocab(self):
+        return self.vocab.copy()
+
+    def _tokenize(self, text):
+        # Simple character-level tokenization for SMILES
+        tokens = list(text)
         # Add special tokens in the required format
         formatted_tokens = ["<|bos|>"] + tokens + ["<|split|>"] + tokens + ["<|eot|>"]
-        # Convert to token IDs
-        return self.tokenizer.convert_tokens_to_ids(formatted_tokens)
-    
-    def decode(self, token_ids):
-        return self.tokenizer.decode(token_ids)
+        return formatted_tokens
+
+    def _convert_token_to_id(self, token):
+        return self.vocab.get(token, self.vocab["<|pad|>"])
+
+    def _convert_id_to_token(self, index):
+        return self.ids_to_tokens.get(index, "<|pad|>")
 
 class SMILESDecoder(torch.nn.Module):
     def __init__(self, vocab_size, hidden_size=256, num_layers=6, num_heads=8, dropout=0.1):
