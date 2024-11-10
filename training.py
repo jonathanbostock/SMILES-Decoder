@@ -1,10 +1,8 @@
 ### Jonathan Bostock 2024-11-09
 import torch
 
-from utils import SMILESDecoder, SMILESTokenizer, SMILESDataset, collate_fn
+from utils import SMILESDecoder, SMILESTokenizer, SMILESDataset, collate_fn, device
 from transformers import Trainer, TrainingArguments
-
-device = "cpu"
 
 def main():
 
@@ -26,8 +24,8 @@ def main():
     training_args = TrainingArguments(
         output_dir="./results",
         num_train_epochs=1,
-        per_device_train_batch_size=32,
-        learning_rate=2e-3,
+        per_device_train_batch_size=64,
+        learning_rate=1e-3,
         weight_decay=0.01,
         logging_dir='./logs',
         logging_steps=100,

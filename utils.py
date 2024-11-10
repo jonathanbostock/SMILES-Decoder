@@ -27,7 +27,7 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
         with open("allmolgen_frag_smiles_vocab.txt", "r") as f:
             vocab = f.read().splitlines()
 
-        special_tokens = ["<|pad|>", "<|bos|>", "<|eot|>", "<|split|>"]
+        special_tokens = ["<|pad|>", "<|bos|>", "<|split|>", "<|new|>", "<|eot|>"]
         
         # Create vocabulary mapping
         self.vocab = {token: i for i, token in enumerate(special_tokens)}
@@ -89,6 +89,32 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
     
     def _convert_id_to_token(self, index):
         return self.ids_to_tokens.get(index, "<|pad|>")
+    
+class SMILESTokenizer(transformers.PreTrainedTokenizerFast):
+    def __init__(self):
+        """
+        Tokenizer for SMILES strings
+        """
+        # Load the vocabulary from file
+        with open("allmolgen_frag_smiles_vocab.txt", "r") as f:
+            vocab = f.read().splitlines()
+
+        special_tokens = ["<|pad|>", "<|bos|>", "<|split|>", "<|new|>", "<|eot|>"]
+        
+        # Create vocabulary mapping
+        vocab_dict = {token: i for i, token in enumerate(special_tokens)}
+        vocab_dict.update({token: i + len(special_tokens) for i, token in enumerate(vocab)})
+
+        # Initialize parent class with tokenizer backend
+        super().__init__(
+            tokenizer_object=transformers.tokenization_utils_fast.Tokenizer.from_str(
+                '{"type": "WordLevel", "vocab": ' + str(vocab_dict) + ', "unk_token": "<|pad|>"}'
+            ),
+            pad_token="<|pad|>",
+            bos_token="<|bos|>",
+            eos_token="<|eot|>",
+            model_max_length=512
+        )
 
 class SMILESDecoder(torch.nn.Module):
     def __init__(self, vocab_size, hidden_size=256, num_layers=6, num_heads=8, dropout=0.1):
@@ -120,72 +146,53 @@ class SMILESDecoder(torch.nn.Module):
         )
         
         # Initialize model components
-        self.embedding = torch.nn.Embedding(vocab_size, hidden_size)
         self.transformer = transformers.GPTNeoModel(config)
-        self.lm_head = torch.nn.Linear(hidden_size, vocab_size, bias=False)
+        # Create shared weight tensor for embedding and output
+        self.embedding = torch.nn.Parameter(torch.empty((vocab_size, hidden_size)))
+        torch.nn.init.normal_(self.embedding, mean=0.0, std=0.02)
         
-        # Tie weights between embedding and output layer
-        self.lm_head.weight = self.embedding.weight
-        
-    def create_causal_mask(self, batch_size, seq_length, split_positions):
+     
+    def forward(
+            self,
+            input_ids: torch.Tensor,
+            output_ids: torch.Tensor = None,
+            attention_mask: torch.Tensor = None
+        ) -> dict[str, torch.Tensor]:
         """
-        Creates a causal mask that prevents tokens after <|split|> from attending to tokens before it.
-        Returns a mask tensor with -1e5 for positions that should not attend to each other.
-        
+        Neural net forward pass, if output_ids are provided, calculate loss.
+        If custom attention mask is provided, use that instead of causal mask.
         Args:
-            batch_size: Size of batch
-            seq_length: Length of sequence
-            split_positions: Tensor of indices where <|split|> token appears in each sequence
-            
-        Returns:
-            torch.Tensor: Attention mask of shape (batch_size, seq_length, seq_length) with -1e5 
-                         for positions that should not attend to each other
+            input_ids: Input IDs
+            output_ids: Output IDs
+            attention_mask: Attention mask
         """
-        # Create base causal mask with -1e5 for upper triangle
-        mask = torch.zeros((batch_size, seq_length, seq_length))
-        causal_mask = torch.triu(torch.ones((seq_length, seq_length)), diagonal=1)
-        mask = mask.masked_fill(causal_mask.bool(), -1e5)
-        
-        # Add split token masking
-        for i in range(batch_size):
-            split_pos = split_positions[i]
-            # Fill with -1e5 where tokens after split should not attend to tokens before split
-            mask[i, split_pos+1:, :split_pos] = -1e5
-            
-        return mask.unsqueeze(1)
-        
-    def forward(self, input_ids, split_positions):
-        # Create custom attention mask
-        batch_size, seq_length = input_ids.shape
-        causal_mask = self.create_causal_mask(
-            batch_size, 
-            seq_length,
-            split_positions
-        ).to(input_ids.device)
-        
         # Get embeddings
-        hidden_states = self.embedding(input_ids)
+        hidden_states = self.embedding[input_ids]
+
+        if attention_mask is None:
+            attention_mask = torch.triu(torch.full((input_ids.size(1), input_ids.size(1)), -1e5), diagonal=1).to(input_ids.device)
         
         # Pass through transformer with custom mask
         transformer_outputs = self.transformer(
             inputs_embeds=hidden_states,
-            attention_mask=causal_mask,
+            attention_mask=attention_mask,
             head_mask=None,
             output_attentions=False,
             return_dict=True,
         )
         
         # Get logits
-        logits = self.lm_head(transformer_outputs.last_hidden_state)
+        logits = transformer_outputs.last_hidden_state @ self.embedding.T
 
         outputs = {"logits": logits}
 
-        if self.training:
+        if output_ids is not None:
             # Calculate loss with extra pad token
-            target = (torch.cat([input_ids[:,1:], torch.zeros(input_ids.size(0), 1, device=input_ids.device)], dim=1)
-                      .type(torch.LongTensor)
-                      .to(input_ids.device))
-            loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1))
+            loss = torch.nn.functional.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                output_ids.view(-1),
+                ignore_index=0
+            )
             outputs["loss"] = loss
 
         return outputs
@@ -223,7 +230,7 @@ class SMILESDataset(torch.utils.data.Dataset):
             'input_ids': encoding.squeeze(0),
         }
     
-def collate_fn(batch: list[dict]):
+def collate_fn(batch: list[dict]) -> dict:
     """
     Collate function for SMILES dataset
 
@@ -238,26 +245,41 @@ def collate_fn(batch: list[dict]):
 
     output = {
         'input_ids': [],
-        'split_positions': []
+        'output_ids': [],
+        'attention_mask': [],
     }
 
-    max_len = max([len(item['input_ids']) for item in batch]) * 2 + 3
+    max_len = max([len(item['input_ids']) for item in batch]) * 2 + 4
     for item in batch:
         split_position = len(item['input_ids']) + 1
+        # This is the position of the <|split|> token in new_input_ids
         input_ids = item['input_ids']
-        new_input_ids = torch.cat([
+        repeated_ids = torch.cat([
             torch.tensor([1]),
             input_ids,
             torch.tensor([2]),
-            input_ids,
             torch.tensor([3]),
-            torch.zeros(max_len - len(input_ids) * 2 - 3, device=input_ids.device)],
+            input_ids,
+            torch.tensor([4]),
+            torch.zeros(max_len - len(input_ids) * 2 - 3, device=input_ids.device)], # -3 because of extra pad token
             dim=0).type(torch.LongTensor)
+        
+        new_input_ids = repeated_ids[:-1]
+        new_output_ids = repeated_ids[1:].clone()
+        new_output_ids[:split_position+1] = 0 # Set output tokens up to split to 0, which is not included in loss
+
         output['input_ids'].append(new_input_ids)
-        output['split_positions'].append(split_position)
+        output['output_ids'].append(new_output_ids)
+
+        # Create base causal mask with -2e5 for upper triangle
+        mask = torch.triu(torch.full((max_len, max_len), -1e5), diagonal=1)
+        mask[split_position+1:, :split_position] = -1e5
+        output['attention_mask'].append(mask)
+
 
     output['input_ids'] = torch.stack(output['input_ids'])
-    output['split_positions'] = torch.tensor(output['split_positions'])
+    output['output_ids'] = torch.stack(output['output_ids'])
+    output['attention_mask'] = torch.stack(output['attention_mask']).unsqueeze(1)
 
     return output
 
