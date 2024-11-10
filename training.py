@@ -1,7 +1,8 @@
 ### Jonathan Bostock 2024-11-09
 import torch
 
-from utils import SMILESDecoder, SMILESTokenizer, get_dataloader, device
+from utils import SMILESDecoder, SMILESTokenizer, SMILESDataset, collate_fn, device
+from transformers import Trainer, TrainingArguments
 
 def main():
 
@@ -13,51 +14,34 @@ def main():
         dropout=0.1
     )
 
-    dataloader = get_dataloader(
+    model.to(device)
+
+    dataset = SMILESDataset(
         csv_path="data/allmolgen_pretrain_data_train.csv",
-        tokenizer=SMILESTokenizer(),
-        batch_size=32,
-        shuffle=True,
-        num_workers=4
+        tokenizer=SMILESTokenizer()
     )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    training_args = TrainingArguments(
+        output_dir="./results",
+        num_train_epochs=1,
+        per_device_train_batch_size=32,
+        learning_rate=2e-3,
+        weight_decay=0.01,
+        logging_dir='./logs',
+        logging_steps=100,
+        save_strategy="epoch",
+        warmup_steps=500,
+        label_smoothing_factor=0.0
+    )
 
-    # Training loop
-    num_epochs = 10
-    model.to(device)
-    
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding token (0)
-    
-    for epoch in range(num_epochs):
-        model.train()
-        total_loss = 0
-        
-        for batch in dataloader:
-            # Move batch to device
-            input_ids = batch['input_ids'].to(device)
-            split_positions = batch['split_position'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            
-            # Forward pass
-            logits = model(input_ids, split_positions, attention_mask)
-            
-            # Calculate loss (shift logits/labels for next-token prediction)
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = input_ids[..., 1:].contiguous()
-            loss = criterion(shift_logits.view(-1, shift_logits.size(-1)), 
-                           shift_labels.view(-1))
-            
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            
-            total_loss += loss.item()
-            
-        avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_loss:.4f}")
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset = dataset,
+        data_collator=collate_fn
+    )
+
+    trainer.train()
 
 if __name__ == "__main__":
     main()
