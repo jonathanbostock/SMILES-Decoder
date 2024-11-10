@@ -1,8 +1,10 @@
 ### Jonathan Bostock 2024-11-09
 import torch
 
-from utils import SMILESDecoder, SMILESTokenizer, SMILESDataset, collate_fn, device
+from utils import SMILESDecoder, SMILESTokenizer, SMILESDataset, collate_fn
 from transformers import Trainer, TrainingArguments
+
+device = "cpu"
 
 def main():
 

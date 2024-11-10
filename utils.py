@@ -90,13 +90,6 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
     def _convert_id_to_token(self, index):
         return self.ids_to_tokens.get(index, "<|pad|>")
 
-    def encode(self, text, **kwargs):
-        base_encoding = super().encode(text, **kwargs)
-        if type(base_encoding) == list:
-            return [1] + base_encoding + [3] + base_encoding + [2]
-        else:
-            return torch.cat([torch.tensor([[1]]), base_encoding, torch.tensor([[3]]), base_encoding, torch.tensor([[2]])], dim=1)
-
 class SMILESDecoder(torch.nn.Module):
     def __init__(self, vocab_size, hidden_size=256, num_layers=6, num_heads=8, dropout=0.1):
         """
@@ -222,28 +215,52 @@ class SMILESDataset(torch.utils.data.Dataset):
         encoding = self.tokenizer.encode(
             smiles,
             max_length=self.max_length,
-            padding='max_length',
             truncation=True,
             return_tensors='pt'
         )
         
-        # Find split position
-        split_pos = (encoding == self.tokenizer.convert_tokens_to_ids("<|split|>")).nonzero()[0][1]
-
-        
         return {
             'input_ids': encoding.squeeze(0),
-            'split_positions': split_pos,
         }
     
-def collate_fn(batch):
+def collate_fn(batch: list[dict]):
     """
     Collate function for SMILES dataset
+
+    Args:
+        batch: Batch of data
+        type: list[dict]
+            dictionary of data with keys 'input_ids' and 'split_positions', types torch.Tensor
+        
+    Returns:
+        dict: Dictionary of batched data
     """
-    return {
-        'input_ids': torch.stack([item['input_ids'] for item in batch]),
-        'split_positions': torch.tensor([item['split_positions'] for item in batch])
+
+    output = {
+        'input_ids': [],
+        'split_positions': []
     }
+
+    max_len = max([len(item['input_ids']) for item in batch]) * 2 + 3
+    for item in batch:
+        split_position = len(item['input_ids']) + 1
+        input_ids = item['input_ids']
+        new_input_ids = torch.cat([
+            torch.tensor([1]),
+            input_ids,
+            torch.tensor([2]),
+            input_ids,
+            torch.tensor([3]),
+            torch.zeros(max_len - len(input_ids) * 2 - 3, device=input_ids.device)],
+            dim=0).type(torch.LongTensor)
+        output['input_ids'].append(new_input_ids)
+        output['split_positions'].append(split_position)
+
+    output['input_ids'] = torch.stack(output['input_ids'])
+    output['split_positions'] = torch.tensor(output['split_positions'])
+
+    return output
+
 
 def get_dataloader(csv_path, tokenizer, batch_size=32, shuffle=True, num_workers=4):
     """
@@ -268,10 +285,10 @@ def get_dataloader(csv_path, tokenizer, batch_size=32, shuffle=True, num_workers
 
 def _test_tokenizer():
     tokenizer = SMILESTokenizer()
-    print("Encoding CCO:\n", tokenizer.encode("CCO"), "\nShould be [1, X, X, Y, 3, X, X, Y, 2]")
-    print("Decoding CCO:\n", tokenizer.decode(tokenizer.encode("CCO")), "\nShould be <|bos|><|CCO|><|split|><|CCO|><|eot|>")
-    print("Encoding C(=O)O:\n", tokenizer.encode("C(=O)O"), "\nShould be [1, A, B, C, D, C, 3, A, B, C, D, C, 2]")
-    print("Encoding [NH-]:\n", tokenizer.encode("[NH-]"), "\nShould be [1, A, 3, A, 2]")
+    print("Encoding CCO:\n", tokenizer.encode("CCO"), "\nShould be [X, X, Y]")
+    print("Decoding CCO:\n", tokenizer.decode(tokenizer.encode("CCO")), "\nShould be  C C O")
+    print("Encoding C(=O)O:\n", tokenizer.encode("C(=O)O"), "\nShould be [A, B, C, D, C]")
+    print("Encoding [NH-]:\n", tokenizer.encode("[NH-]"), "\nShould be [N]")
 
 def _test_decoder():
     decoder = SMILESDecoder(vocab_size=100, hidden_size=256, num_layers=6, num_heads=8, dropout=0.1)
@@ -280,7 +297,7 @@ def _test_decoder():
 
 if __name__ == "__main__":
     # Unit test the tokenizer
-    #_test_tokenizer()
+    _test_tokenizer()
 
     # Unit test the decoder
-    _test_decoder()
+    #_test_decoder()
