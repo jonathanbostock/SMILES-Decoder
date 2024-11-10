@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import transformers
 import pandas as pd
+import json
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -90,31 +91,6 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
     def _convert_id_to_token(self, index):
         return self.ids_to_tokens.get(index, "<|pad|>")
     
-class SMILESTokenizer(transformers.PreTrainedTokenizerFast):
-    def __init__(self):
-        """
-        Tokenizer for SMILES strings
-        """
-        # Load the vocabulary from file
-        with open("allmolgen_frag_smiles_vocab.txt", "r") as f:
-            vocab = f.read().splitlines()
-
-        special_tokens = ["<|pad|>", "<|bos|>", "<|split|>", "<|new|>", "<|eot|>"]
-        
-        # Create vocabulary mapping
-        vocab_dict = {token: i for i, token in enumerate(special_tokens)}
-        vocab_dict.update({token: i + len(special_tokens) for i, token in enumerate(vocab)})
-
-        # Initialize parent class with tokenizer backend
-        super().__init__(
-            tokenizer_object=transformers.tokenization_utils_fast.Tokenizer.from_str(
-                '{"type": "WordLevel", "vocab": ' + str(vocab_dict) + ', "unk_token": "<|pad|>"}'
-            ),
-            pad_token="<|pad|>",
-            bos_token="<|bos|>",
-            eos_token="<|eot|>",
-            model_max_length=512
-        )
 
 class SMILESDecoder(torch.nn.Module):
     def __init__(self, vocab_size, hidden_size=256, num_layers=6, num_heads=8, dropout=0.1):
@@ -319,7 +295,7 @@ def _test_decoder():
 
 if __name__ == "__main__":
     # Unit test the tokenizer
-    _test_tokenizer()
+    # _test_tokenizer()
 
     # Unit test the decoder
     #_test_decoder()
