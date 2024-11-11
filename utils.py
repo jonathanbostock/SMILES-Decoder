@@ -84,7 +84,6 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
     def get_vocab(self):
         return self.vocab.copy()
     
-    
     def _convert_token_to_id(self, token):
         return self.vocab.get(token, self.vocab["<|pad|>"])
     
@@ -160,7 +159,8 @@ class SMILESDecoder(torch.nn.Module):
         # Get logits
         logits = transformer_outputs.last_hidden_state @ self.embedding.T
 
-        outputs = {"logits": logits}
+        outputs = {"transformer_outputs": transformer_outputs, 
+                   "logits": logits}
 
         if output_ids is not None:
             # Calculate loss with extra pad token
@@ -299,3 +299,4 @@ if __name__ == "__main__":
 
     # Unit test the decoder
     #_test_decoder()
+    pass
