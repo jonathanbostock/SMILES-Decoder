@@ -1,136 +1,33 @@
 ### Sparse Autoencoders
+from utils import SMILESTokenizer, SMILESDataset, SMILESDecoder, device
+from utils import GatedSparseCrossCoder as GSC
+from utils import GatedSparseCrossCoderConfig as GSCConfig
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from dataclasses import dataclass
+def main():
+    generate_data(
+        model_path="results/1.3M-checkpoint-50733/model.safetensors",
+        model_layers = [],
+        dataset_path="data/allmolgen_pretrain_data_train.csv",
+        output_path="results/1.3M-checkpoint-50733/activations.pt"
+    )
 
-@dataclass
-class GatedSparseCrossCoderConfig:
-    input_dim: int
-    num_input_layers: int
-    hidden_dim: int
-
-class GatedSparseCrossCoder(nn.Module):
+def generate_data(
+        model_path: str,
+        model_layers: list[str],
+        dataset_path: str,
+        output_path: str,
+    ) -> None:
     """
-    A sparse cross-coder with a gated activation function. Uses L1 regularization on a gate path,
-    and an auxiliary loss to prevent the gate path magnitudes from going to zero.
-    Based on the work of https://arxiv.org/pdf/2404.16014 and https://transformer-circuits.pub/2024/crosscoders/index.html
+    Generates a dataset of activations from a trained model.
+
+    Args:
+        model_path: Path to the trained model
+        model_layers: List of layers to generate activations for
+        dataset_path: Path to the dataset to generate activations for
+        output_path: Path to save the generated activations
     """
-    def __init__(self, config: GatedSparseCrossCoderConfig):
-        """Initializes from GatedSparseCrossCoderConfig"""
-        super(GatedSparseCrossCoder, self).__init__()
-        self.config = config
 
-        W = nn.Parameter(torch.randn(
-            self.config.input_dim, 
-            self.config.num_input_layers,
-            self.config.hidden_dim))
-        
-        W_norms = self.get_l1_norms(W)
-        W_normed = torch.einsum("ild, d -> ild", W, 1/W_norms)
-        
-        self.W_enc = nn.Parameter(W_normed.clone())
-        self.W_dec = nn.Parameter(W_normed.clone())
-        self.b_gate = nn.Parameter(torch.zeros(self.config.hidden_dim))
-        self.b_mag = nn.Parameter(torch.zeros(self.config.hidden_dim))
-        self.r_mag = nn.Parameter(torch.zeros(self.config.hidden_dim))
+    model = SMILESDecoder.from_pretrained(model_path)
 
-        self.W_dec.register_hook(self._normalize_W_dec)
-
-    def _normalize_W_dec(self, grad: torch.Tensor|None) -> torch.Tensor|None:
-        """
-        Normalizes the columns of the decoder matrix as these might otherwise go to zero
-        Should normally only be called as a backward hook on W_dec.
-        
-        Args:
-            grad: Gradient of the loss with respect to the decoder matrix (optional)
-        
-        Returns:
-            grad: Gradient of the loss with respect to the decoder matrix (optional)
-        """
-        W_dec_norms = self.get_l1_norms(self.W_dec)
-        self.W_dec = torch.einsum("ild, d -> ild", grad, 1/W_dec_norms)
-        return grad
-
-    @staticmethod
-    def get_l1_norms(W: torch.Tensor) -> torch.Tensor:
-        """
-        Gets the summed l1 norms for a weight matrix.
-
-        Args:
-            W: Weight matrix of shape (input_dim, num_input_layers, hidden_dim)
-        
-        Returns:
-            norms: Summed l1 norms for each hidden dimension of shape (hidden_dim)
-        """
-        norms_per_layer = torch.norm(W, p=1, dim=0)
-        norm_sum = torch.sum(norms_per_layer, dim=1)
-        return norm_sum
-    
-    def encode(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        """
-        Encodes a tensor of shape (batch_size, input_dim, input_layers)
-
-        Args:
-            x: Tensor of shape (batch_size, input_dim)
-        
-        Returns:
-            dict[str, torch.Tensor]: Dictionary containing "activations", "gate_path" and "mag_path"
-        """
-
-        preactivations = torch.einsum("bil, ild -> bd", x, self.W_enc)
-        gate_path = preactivations + self.b_gate
-        mag_path = preactivations * F.exp(self.b_mag) + self.b_mag
-
-        activations = torch.heaviside(gate_path, torch.tensor(0)) * F.relu(mag_path)
-
-        return {"activations": activations, "gate_path": gate_path, "mag_path": mag_path}
-    
-    def decode(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Decodes a tensor of shape (batch_size, hidden_dim)
-
-        Args:
-            x: Tensor of shape (batch_size, hidden_dim)
-        
-        Returns:
-            y: Tensor of shape (batch_size, input_dim, input_layers)
-        """
-        return torch.einsum("bd, dlj -> blj", x, self.W_dec)
-    
-    def forward(self, x: torch.Tensor, target_x: torch.Tensor = None) -> dict[str, torch.Tensor]:
-        """
-        Forward pass
-
-        Args:
-            x: Tensor of shape (batch_size, input_dim, input_layers)
-            target_x: Tensor of shape (batch_size, input_dim, input_layers) (optional)
-
-        Returns:
-            dict[str, torch.Tensor]: Dictionary containing "activations", "reconstruction" and optionally
-            "l2_loss", "l1_loss", "aux_loss" if target_x is provided
-        """
-
-        encoding = self.encode(x)
-        activations = encoding["activations"]
-        gate_path = encoding["gate_path"]
-        reconstruction = self.decode(activations)
-
-        if target_x is not None:
-            # All losses calculated as average over batch
-            # L2 loss is just reconstruction loss
-            l2_loss = F.mse_loss(reconstruction, target_x)
-
-            # L1 loss is the average of the product of the gate path and the l1 norms of the decoder weights
-            # Encourages sparsity in the gate path
-            W_dec_l1s = self.get_l1_norms(self.W_dec)
-            l1_loss = torch.mean(W_dec_l1s * gate_path)
-
-            # Auxiliary loss is the average of the mse between the auxiliary reconstruction and the target
-            # This prevents the gate path magnitudes from going to zero due to the l1 loss
-            aux_reconstruction = torch.einsum("bd, dlj -> blj", F.relu(gate_path), self.W_dec.detach())
-            aux_loss = F.mse_loss(aux_reconstruction, target_x)
-
-        return {"activations": encoding["activations"], "reconstruction": reconstruction,
-                "l2_loss": l2_loss, "l1_loss": l1_loss, "aux_loss": aux_loss}
+if __name__ == "__main__":
+    main()
