@@ -1,3 +1,2 @@
 data/*.csv
-results/*.pt
-results/*.pth
+results/*

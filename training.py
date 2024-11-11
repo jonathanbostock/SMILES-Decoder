@@ -8,9 +8,9 @@ def main():
 
     model = SMILESDecoder(
         vocab_size=512,
-        hidden_size=512,
+        hidden_size=128,
         num_layers=6,
-        num_heads=8,
+        num_heads=4,
         dropout=0.1
     )
 

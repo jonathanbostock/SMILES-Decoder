@@ -78,6 +78,7 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
             else:  # No match found, use single character
                 tokens.append(text[i])
                 i += 1
+
                 
         return tokens
 

@@ -28,15 +28,33 @@ class GatedSparseCrossCoder(nn.Module):
             self.config.hidden_dim))
         
         W_norms = self.get_l1_norms(W)
-        W_normed = torch.einsum("ild, d -> ild", W, 1/W_norms) * 0.1
+        W_normed = torch.einsum("ild, d -> ild", W, 1/W_norms)
         
-        self.W_up = nn.Parameter(W_normed.clone())
-        self.W_down = nn.Parameter(W_normed.clone())
+        self.W_enc = nn.Parameter(W_normed.clone())
+        self.W_dec = nn.Parameter(W_normed.clone())
         self.b_gate = nn.Parameter(torch.zeros(self.config.hidden_dim))
         self.b_mag = nn.Parameter(torch.zeros(self.config.hidden_dim))
         self.r_mag = nn.Parameter(torch.zeros(self.config.hidden_dim))
 
-    def get_l1_norms(self, W: torch.Tensor) -> torch.Tensor:
+        self.W_dec.register_hook(self._normalize_W_dec)
+
+    def _normalize_W_dec(self, grad: torch.Tensor|None) -> torch.Tensor|None:
+        """
+        Normalizes the columns of the decoder matrix as these might otherwise go to zero
+        Should normally only be called as a backward hook on W_dec.
+        
+        Args:
+            grad: Gradient of the loss with respect to the decoder matrix (optional)
+        
+        Returns:
+            grad: Gradient of the loss with respect to the decoder matrix (optional)
+        """
+        W_dec_norms = self.get_l1_norms(self.W_dec)
+        self.W_dec = torch.einsum("ild, d -> ild", grad, 1/W_dec_norms)
+        return grad
+
+    @staticmethod
+    def get_l1_norms(W: torch.Tensor) -> torch.Tensor:
         """
         Gets the summed l1 norms for a weight matrix.
 
@@ -58,9 +76,10 @@ class GatedSparseCrossCoder(nn.Module):
             x: Tensor of shape (batch_size, input_dim)
         
         Returns:
+            dict[str, torch.Tensor]: Dictionary containing "activations", "gate_path" and "mag_path"
         """
 
-        preactivations = torch.einsum("bil, ild -> bd", x, self.W_up)
+        preactivations = torch.einsum("bil, ild -> bd", x, self.W_enc)
         gate_path = preactivations + self.b_gate
         mag_path = preactivations * F.exp(self.b_mag) + self.b_mag
 
@@ -78,7 +97,7 @@ class GatedSparseCrossCoder(nn.Module):
         Returns:
             y: Tensor of shape (batch_size, input_dim, input_layers)
         """
-        return torch.einsum("bd, dlj -> blj", x, self.W_down)
+        return torch.einsum("bd, dlj -> blj", x, self.W_dec)
     
     def forward(self, x: torch.Tensor, target_x: torch.Tensor = None) -> dict[str, torch.Tensor]:
         """
@@ -103,15 +122,15 @@ class GatedSparseCrossCoder(nn.Module):
             # L2 loss is just reconstruction loss
             l2_loss = F.mse_loss(reconstruction, target_x)
 
-            # L1 loss is the average of the product of the gate path and the l1 norms of the down weights
+            # L1 loss is the average of the product of the gate path and the l1 norms of the decoder weights
             # Encourages sparsity in the gate path
-            W_down_l1s = self.get_l1_norms(self.W_down)
-            l1_loss = torch.mean(W_down_l1s * gate_path)
+            W_dec_l1s = self.get_l1_norms(self.W_dec)
+            l1_loss = torch.mean(W_dec_l1s * gate_path)
 
             # Auxiliary loss is the average of the mse between the auxiliary reconstruction and the target
             # This prevents the gate path magnitudes from going to zero due to the l1 loss
-            aux_reconstruction = torch.einsum("bd, dlj -> blj", F.relu(gate_path), self.W_down.detach())
+            aux_reconstruction = torch.einsum("bd, dlj -> blj", F.relu(gate_path), self.W_dec.detach())
             aux_loss = F.mse_loss(aux_reconstruction, target_x)
 
-        return {"activations": encoding["activations"], "reconstruction": reconstruction, 
+        return {"activations": encoding["activations"], "reconstruction": reconstruction,
                 "l2_loss": l2_loss, "l1_loss": l1_loss, "aux_loss": aux_loss}
