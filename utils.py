@@ -165,33 +165,24 @@ class SMILESTransformer(transformers.PreTrainedModel):
 
         return model
     
-    @classmethod
-    def save_pretrained(cls, save_path: str):
+    def _save(self, save_path: str):
         """
         Saves the model weights and config to files.
         
         Args:
             save_path: Directory path to save the model and config files
         """
-        print("SAVING")
-        # Create directory if it doesn't exist
-        os.makedirs(save_path, exist_ok=True)
-        
-        # Save model weights
-        model_path = os.path.join(save_path, "model.safetensors")
-        save_file(model_path, self.state_dict())
-        
-        # Save config
-        config_path = os.path.join(save_path, "config.json")
-        config_dict = {
-            "vocab_size": self.config.vocab_size,
-            "hidden_size": self.config.hidden_size, 
-            "num_layers": self.config.num_layers,
-            "num_heads": self.config.num_heads,
-            "dropout": self.config.dropout
-        }
-        with open(config_path, "w") as f:
+        config_dict = self.config.to_dict()
+        config_dict["vocab_size"] = self.config.vocab_size
+        config_dict["hidden_size"] = self.config.hidden_size
+        config_dict["num_layers"] = self.config.num_layers
+        config_dict["num_heads"] = self.config.num_heads
+        config_dict["dropout"] = self.config.dropout
+
+        with open(os.path.join(save_path, "config.json"), "w") as f:
             json.dump(config_dict, f, indent=2)
+
+        super()._save(save_path)
 
         
     def forward(
