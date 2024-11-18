@@ -93,14 +93,23 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
     
     def _convert_id_to_token(self, index):
         return self.ids_to_tokens.get(index, "<|pad|>")
+
+@dataclass
+class SMILESTransformerConfig():
+    vocab_size: int
+    hidden_size: int
+    num_layers: int
+    num_heads: int
+    dropout: float
     
 
-class SMILESDecoder(torch.nn.Module):
+
+class SMILESTransformer(transformers.PreTrainedModel):
     """
     Decoder-only transformer model for SMILES strings.
     Accepts custom masks, allowing for bottlenecking and use as a generative autoencoder
     """
-    def __init__(self, vocab_size, hidden_size=256, num_layers=6, num_heads=8, dropout=0.1):
+    def __init__(self, config: SMILESTransformerConfig):
         """
         Args:
             vocab_size: Size of vocabulary
@@ -111,29 +120,33 @@ class SMILESDecoder(torch.nn.Module):
         """
         super().__init__()
 
-        # Create config for GPTNeo
-        config = transformers.GPTNeoConfig(
-            vocab_size=vocab_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            attention_types=[[["global"], num_layers]],
-            window_size=None,
-            num_attention_heads=num_heads,
-            max_position_embeddings=512,
-            attention_dropout=dropout,
-            hidden_dropout=dropout,
+        self.config = config
+        
+        # Create config for GPT2
+        config = transformers.GPT2Config(
+            vocab_size=self.config.vocab_size,
+            hidden_size=self.config.hidden_size,
+            num_hidden_layers=self.config.num_layers,
+            num_attention_heads=self.config.num_heads,
+            attention_dropout=self.config.dropout,
+            hidden_dropout=self.config.dropout,
             bos_token_id=1,  # <|bos|> token
             eos_token_id=3,  # <|eot|> token
-            pad_token_id=0   # <|pad|> token
+            pad_token_id=0,  # <|pad|> token
+            position_embedding_type="alibi",  # Enable ALiBi
+            max_position_embeddings=512,
+            return_dict_in_generate=True,
+            output_hidden_states=True
         )
         
         # Initialize model components
-        self.transformer = transformers.GPTNeoModel(config)
+        self.model = transformers.GPT2Model(config)
+
         # Create shared weight tensor for embedding and output
-        self.embedding = torch.nn.Parameter(torch.empty((vocab_size, hidden_size)))
+        self.embedding = torch.nn.Parameter(torch.empty((self.config.vocab_size, self.config.hidden_size)))
         torch.nn.init.normal_(self.embedding, mean=0.0, std=0.02)
 
-    def from_pretrained(model_path: str, config_path: str) -> "SMILESDecoder":
+    def from_pretrained(model_path: str, config_path: str) -> "SMILESTransformer":
         """
         Loads a pretrained model from a file.
         """
@@ -141,7 +154,7 @@ class SMILESDecoder(torch.nn.Module):
 
         config = json.load(open(config_path, "r"))
 
-        model = SMILESDecoder(
+        model = SMILESTransformer(
             vocab_size=config["vocab_size"],
             hidden_size=config["hidden_size"],
             num_layers=config["num_layers"],
@@ -151,53 +164,79 @@ class SMILESDecoder(torch.nn.Module):
         model.load_state_dict(state_dict)
 
         return model
-     
+    
+    @classmethod
+    def save_pretrained(cls, save_path: str):
+        """
+        Saves the model weights and config to files.
+        
+        Args:
+            save_path: Directory path to save the model and config files
+        """
+        print("SAVING")
+        # Create directory if it doesn't exist
+        os.makedirs(save_path, exist_ok=True)
+        
+        # Save model weights
+        model_path = os.path.join(save_path, "model.safetensors")
+        save_file(model_path, self.state_dict())
+        
+        # Save config
+        config_path = os.path.join(save_path, "config.json")
+        config_dict = {
+            "vocab_size": self.config.vocab_size,
+            "hidden_size": self.config.hidden_size, 
+            "num_layers": self.config.num_layers,
+            "num_heads": self.config.num_heads,
+            "dropout": self.config.dropout
+        }
+        with open(config_path, "w") as f:
+            json.dump(config_dict, f, indent=2)
+
+        
     def forward(
             self,
             input_ids: torch.Tensor,
-            output_ids: torch.Tensor = None,
-            attention_mask: torch.Tensor = None
         ) -> dict[str, torch.Tensor]:
         """
         Neural net forward pass, if output_ids are provided, calculate loss.
         If custom attention mask is provided, use that instead of causal mask.
         Args:
-            input_ids: Input IDs
-            output_ids: Output IDs
-            attention_mask: Attention mask
+            input_ids: Input token IDs, size (batch_size, sequence_length)
         """
-        # Get embeddings
-        hidden_states = self.embedding[input_ids]
+        embedded_tokens_for_encoder = self.embedding[input_ids] # size (batch_size, sequence_length, hidden_size)
+        input_ids_for_decoder = input_ids.clone()
+        input_ids_for_decoder[input_ids == 2] = 3 # Replace <|split|> with <|eos|>
+        embedded_tokens_for_decoder = self.embedding[input_ids_for_decoder][:, 1:] # size (batch_size, sequence_length, hidden_size)
 
-        if attention_mask is None:
-            attention_mask = torch.triu(torch.full((input_ids.size(1), input_ids.size(1)), -1e5), diagonal=1).to(input_ids.device)
+        encoding_outputs = self.model(inputs_embeds=embedded_tokens_for_encoder)
+
+        # Find indices of <|split|> tokens (token_id == 2)
+        split_positions = (input_ids == 2).nonzero()[:, 1]  # Get sequence positions only
         
-        # Pass through transformer with custom mask
-        transformer_outputs = self.transformer(
-            inputs_embeds=hidden_states,
-            attention_mask=attention_mask,
-            head_mask=None,
-            output_attentions=False,
-            return_dict=True,
-        )
-        
-        # Get logits
-        logits = transformer_outputs.last_hidden_state @ self.embedding.T
+        # Extract embeddings from final hidden layer at split token positions
+        batch_indices = torch.arange(input_ids.size(0), device=input_ids.device)
+        embeddings = encoding_outputs.hidden_states[-1][batch_indices, split_positions]  # size (batch_size, hidden_size)
 
-        outputs = {"transformer_outputs": transformer_outputs, 
-                   "logits": logits}
+        embedded_tokens_for_decoder = torch.cat([embeddings.unsqueeze(1), embedded_tokens_for_decoder], dim=1)
 
-        if output_ids is not None:
-            # Calculate loss with extra pad token
-            loss = torch.nn.functional.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                output_ids.view(-1),
-                ignore_index=0
-            )
-            outputs["loss"] = loss
+        decoding_outputs = self.model(inputs_embeds=embedded_tokens_for_decoder)
 
-        return outputs
+        return_dict = {
+            "encoding_outputs": encoding_outputs,
+            "decoding_outputs": decoding_outputs,
+            "input_ids": input_ids,
+            "embeddings": embeddings
+        }
 
+        if self.training:
+            # Ignore padding tokens (0) in loss calculation
+            logits = decoding_outputs.hidden_states[-1][:, :-1, :].flatten(0, 1)  # (batch*seq_len, vocab_size) 
+            targets = input_ids_for_decoder[:, 1:].flatten(0, 1)  # (batch*seq_len)
+            loss = F.cross_entropy(logits, targets, ignore_index=0)
+            return_dict["loss"] = loss
+
+        return return_dict
 
 class SMILESDataset(torch.utils.data.Dataset):
     def __init__(self, csv_path, tokenizer, max_length=512):
@@ -246,41 +285,23 @@ def collate_fn(batch: list[dict]) -> dict:
 
     output = {
         'input_ids': [],
-        'output_ids': [],
-        'attention_mask': [],
     }
 
-    max_len = max([len(item['input_ids']) for item in batch]) * 2 + 4
+    max_len = max([len(item['input_ids']) for item in batch]) + 2
     for item in batch:
         split_position = len(item['input_ids']) + 1
         # This is the position of the <|split|> token in new_input_ids
         input_ids = item['input_ids']
-        repeated_ids = torch.cat([
+        ids = torch.cat([
             torch.tensor([1]),
             input_ids,
             torch.tensor([2]),
-            torch.tensor([3]),
-            input_ids,
-            torch.tensor([4]),
-            torch.zeros(max_len - len(input_ids) * 2 - 3, device=input_ids.device)], # -3 because of extra pad token
+            torch.zeros(max_len - len(input_ids) - 2, device=input_ids.device)],
             dim=0).type(torch.LongTensor)
-        
-        new_input_ids = repeated_ids[:-1]
-        new_output_ids = repeated_ids[1:].clone()
-        new_output_ids[:split_position+1] = 0 # Set output tokens up to split to 0, which is not included in loss
 
-        output['input_ids'].append(new_input_ids)
-        output['output_ids'].append(new_output_ids)
-
-        # Create base causal mask with -2e5 for upper triangle
-        mask = torch.triu(torch.full((max_len, max_len), -1e5), diagonal=1)
-        mask[split_position+1:, :split_position] = -1e5
-        output['attention_mask'].append(mask)
-
+        output['input_ids'].append(ids)
 
     output['input_ids'] = torch.stack(output['input_ids'])
-    output['output_ids'] = torch.stack(output['output_ids'])
-    output['attention_mask'] = torch.stack(output['attention_mask']).unsqueeze(1)
 
     return output
 

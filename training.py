@@ -1,18 +1,20 @@
 ### Jonathan Bostock 2024-11-09
 import torch
 
-from utils import SMILESDecoder, SMILESTokenizer, SMILESDataset, collate_fn, device
+from utils import SMILESTransformer, SMILESTransformerConfig, SMILESTokenizer, SMILESDataset, collate_fn, device
 from transformers import Trainer, TrainingArguments
 
 def main():
 
-    model = SMILESDecoder(
+    model_config = SMILESTransformerConfig(
         vocab_size=512,
         hidden_size=128,
         num_layers=6,
         num_heads=4,
         dropout=0.1
     )
+
+    model = SMILESTransformer(model_config)
 
     model.to(device)
 
@@ -23,7 +25,7 @@ def main():
 
     training_args = TrainingArguments(
         output_dir="./results",
-        num_train_epochs=1,
+        num_train_epochs=0.01,
         per_device_train_batch_size=64,
         learning_rate=1e-4,
         weight_decay=0.01,
