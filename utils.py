@@ -5,6 +5,7 @@ import torch
 import transformers
 import pandas as pd
 import json
+import os
 from safetensors.torch import load_file
 from dataclasses import dataclass
 import torch.nn as nn
@@ -88,6 +89,9 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
     def get_vocab(self):
         return self.vocab.copy()
     
+    def get_vocab_size(self):
+        return len(self.vocab)
+
     def _convert_token_to_id(self, token):
         return self.vocab.get(token, self.vocab["<|pad|>"])
     
@@ -101,13 +105,11 @@ class SMILESTransformerConfig():
     num_layers: int
     num_heads: int
     dropout: float
-    
 
 
-class SMILESTransformer(transformers.PreTrainedModel):
+class SMILESTransformer(nn.Module):
     """
     Decoder-only transformer model for SMILES strings.
-    Accepts custom masks, allowing for bottlenecking and use as a generative autoencoder
     """
     def __init__(self, config: SMILESTransformerConfig):
         """
@@ -155,35 +157,17 @@ class SMILESTransformer(transformers.PreTrainedModel):
         config = json.load(open(config_path, "r"))
 
         model = SMILESTransformer(
-            vocab_size=config["vocab_size"],
-            hidden_size=config["hidden_size"],
-            num_layers=config["num_layers"],
-            num_heads=config["num_heads"],
-            dropout=0
+            config=SMILESTransformerConfig(
+                vocab_size=config["vocab_size"],
+                hidden_size=config["hidden_size"],
+                num_layers=config["num_layers"],
+                num_heads=config["num_heads"],
+                dropout=config["dropout"]
+            )
         )
         model.load_state_dict(state_dict)
 
         return model
-    
-    def _save(self, save_path: str):
-        """
-        Saves the model weights and config to files.
-        
-        Args:
-            save_path: Directory path to save the model and config files
-        """
-        config_dict = self.config.to_dict()
-        config_dict["vocab_size"] = self.config.vocab_size
-        config_dict["hidden_size"] = self.config.hidden_size
-        config_dict["num_layers"] = self.config.num_layers
-        config_dict["num_heads"] = self.config.num_heads
-        config_dict["dropout"] = self.config.dropout
-
-        with open(os.path.join(save_path, "config.json"), "w") as f:
-            json.dump(config_dict, f, indent=2)
-
-        super()._save(save_path)
-
         
     def forward(
             self,
