@@ -172,37 +172,55 @@ class SMILESTransformer(nn.Module):
     def forward(
             self,
             input_ids: torch.Tensor,
+            encode: bool = True,
+            decode: bool = True,
+            fingerprints: torch.Tensor = None
         ) -> dict[str, torch.Tensor]:
         """
         Neural net forward pass, if output_ids are provided, calculate loss.
         If custom attention mask is provided, use that instead of causal mask.
         Args:
             input_ids: Input token IDs, size (batch_size, sequence_length)
+            encode: bool, whether to encode the input IDs, default True
+            decode: bool, whether to decode the input IDs, default True
+            fingerprints: torch.Tensor, size (batch_size, sequence_length, hidden_size), optional
+
+        Returns:
+            dict[str, torch.Tensor]: Dictionary containing "input_ids"
+            also contains "encoding_outputs" and "fingerprints" if encode is True
+            also contains "decoding_outputs" if decode is True
+            also contains "loss" if self.training is True
+
+        Invalid states:
+            Must encode or decode
+            Must either encode or provide fingerprints
         """
-        embedded_tokens_for_encoder = self.embedding[input_ids] # size (batch_size, sequence_length, hidden_size)
-        input_ids_for_decoder = input_ids.clone()
-        input_ids_for_decoder[input_ids == 2] = 3 # Replace <|split|> with <|eos|>
-        embedded_tokens_for_decoder = self.embedding[input_ids_for_decoder][:, 1:] # size (batch_size, sequence_length, hidden_size)
+        assert decode or encode, "Must encode or decode"
+        assert encode or fingerprints is not None, "Must either encode or provide fingerprints"
 
-        encoding_outputs = self.model(inputs_embeds=embedded_tokens_for_encoder)
+        return_dict = {"input_ids": input_ids}
 
-        # Find indices of <|split|> tokens (token_id == 2)
-        split_positions = (input_ids == 2).nonzero()[:, 1]  # Get sequence positions only
+        if encode:
+            input_ids_for_encoder = input_ids.clone()
+            input_ids_for_encoder[input_ids == 3] = 2 # Replace <|eos|> with <|split|>
+            embedded_tokens_for_encoder = self.embedding[input_ids_for_encoder] # size (batch_size, sequence_length, hidden_size)
+
+            encoding_outputs = self.model(inputs_embeds=embedded_tokens_for_encoder)
+            return_dict["encoding_outputs"] = encoding_outputs
+
+            # Find indices of <|split|> tokens (token_id == 2)
+            split_positions = (input_ids_for_encoder == 2).nonzero()[:, 1]  # Get sequence positions only
         
-        # Extract embeddings from final hidden layer at split token positions
-        batch_indices = torch.arange(input_ids.size(0), device=input_ids.device)
-        embeddings = encoding_outputs.hidden_states[-1][batch_indices, split_positions]  # size (batch_size, hidden_size)
+            # Extract embeddings from final hidden layer at split token positions
+            batch_indices = torch.arange(input_ids.size(0), device=input_ids.device)
+            fingerprints = encoding_outputs.hidden_states[-1][batch_indices, split_positions]  # size (batch_size, hidden_size)
+            return_dict["fingerprints"] = fingerprints
 
-        embedded_tokens_for_decoder = torch.cat([embeddings.unsqueeze(1), embedded_tokens_for_decoder], dim=1)
-
-        decoding_outputs = self.model(inputs_embeds=embedded_tokens_for_decoder)
-
-        return_dict = {
-            "encoding_outputs": encoding_outputs,
-            "decoding_outputs": decoding_outputs,
-            "input_ids": input_ids,
-            "embeddings": embeddings
-        }
+        if decode:
+            input_ids_for_decoder = input_ids.clone()
+            embedded_tokens_for_decoder = self.embedding[input_ids_for_decoder][:, 1:] # size (batch_size, sequence_length, hidden_size)
+            decoding_outputs = self.model(inputs_embeds=embedded_tokens_for_decoder)
+            return_dict["decoding_outputs"] = decoding_outputs
 
         if self.training:
             # Ignore padding tokens (0) in loss calculation
