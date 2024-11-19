@@ -2,6 +2,8 @@
 
 import pandas as pd
 import numpy as np
+from rdkit import Chem, RDRandom
+from tqdm import tqdm
 
 def main():
     # Create train-validation-test split
@@ -14,19 +16,26 @@ def main():
     pass
 
 def data_split(csv_path, seed, test_size, validation_size):
+    """Split a dataset into train, validation, and test sets, and save to CSV files
+
+    Args:
+        csv_path: Path to the CSV file containing the dataset
+        seed: Random seed for reproducibility
+        test_size: Proportion of the dataset to include in the test split
+        validation_size: Proportion of the dataset to include in the validation split
+    """
 
     # Read the CSV file
-    df = pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path, index_col=0)
     
-    # Set random seed
+    # Set random seed(s)
     np.random.seed(seed)
     
     # Get number of samples for each split
     n_samples = len(df)
     n_test = int(n_samples * test_size)
     n_val = int(n_samples * validation_size)
-    n_train = n_samples - n_test - n_val
-    
+        
     # Generate random indices for splits
     indices = np.random.permutation(n_samples)
     test_indices = indices[:n_test]

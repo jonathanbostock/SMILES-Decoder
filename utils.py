@@ -5,9 +5,9 @@ import torch
 import transformers
 import pandas as pd
 import json
-import os
 from safetensors.torch import load_file
 from dataclasses import dataclass
+from rdkit import Chem
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -100,16 +100,19 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
 
 @dataclass
 class SMILESTransformerConfig():
-    vocab_size: int
+    decoder_vocab_size: int
+    encoder_vocab_size: int
     hidden_size: int
-    num_layers: int
-    num_heads: int
+    num_decoder_layers: int
+    num_encoder_layers: int
+    num_decoder_heads: int
+    num_encoder_heads: int
     dropout: float
 
 
 class SMILESTransformer(nn.Module):
     """
-    Decoder-only transformer model for SMILES strings.
+    Encoder-decoder transformer model which converts graphs to fingerprints and then to SMILES strings.
     """
     def __init__(self, config: SMILESTransformerConfig):
         """
@@ -123,13 +126,25 @@ class SMILESTransformer(nn.Module):
         super().__init__()
 
         self.config = config
+
+        # Create config for encoder
+        encoder_config = transformers.BertConfig(
+            vocab_size=self.config.encoder_vocab_size,
+            hidden_size=self.config.hidden_size,
+            num_hidden_layers=self.config.num_encoder_layers,
+            num_attention_heads=self.config.num_encoder_heads,
+            attention_dropout=self.config.dropout,
+            hidden_dropout=self.config.dropout,
+            position_embedding_type=None,
+            max_position_embeddings=0,
+        )
         
         # Create config for GPT2
-        config = transformers.GPT2Config(
-            vocab_size=self.config.vocab_size,
+        decoder_config = transformers.GPT2Config(
+            vocab_size=self.config.decoder_vocab_size,
             hidden_size=self.config.hidden_size,
-            num_hidden_layers=self.config.num_layers,
-            num_attention_heads=self.config.num_heads,
+            num_hidden_layers=self.config.num_decoder_layers,
+            num_attention_heads=self.config.num_decoder_heads,
             attention_dropout=self.config.dropout,
             hidden_dropout=self.config.dropout,
             bos_token_id=1,  # <|bos|> token
@@ -142,11 +157,19 @@ class SMILESTransformer(nn.Module):
         )
         
         # Initialize model components
-        self.model = transformers.GPT2Model(config)
+        self.encoder = transformers.BertModel(encoder_config)
+        self.decoder = transformers.GPT2Model(decoder_config)
+
+        # Create the encoder bias terms
+        encoder_bias = torch.logspace(0, -3, self.config.num_encoder_heads, base=2)
+        self.register_buffer("encoder_bias", encoder_bias)
 
         # Create shared weight tensor for embedding and output
-        self.embedding = torch.nn.Parameter(torch.empty((self.config.vocab_size, self.config.hidden_size)))
-        torch.nn.init.normal_(self.embedding, mean=0.0, std=0.02)
+        self.decoder_embedding = torch.nn.Parameter(torch.empty((self.config.decoder_vocab_size, self.config.hidden_size)))
+        torch.nn.init.normal_(self.decoder_embedding, mean=0.0, std=0.02)
+
+        self.encoder_embedding = torch.nn.Parameter(torch.empty((self.config.encoder_vocab_size, self.config.hidden_size)))
+        torch.nn.init.normal_(self.encoder_embedding, mean=0.0, std=0.02)
 
     def from_pretrained(model_path: str, config_path: str) -> "SMILESTransformer":
         """
@@ -158,76 +181,83 @@ class SMILESTransformer(nn.Module):
 
         model = SMILESTransformer(
             config=SMILESTransformerConfig(
-                vocab_size=config["vocab_size"],
+                decoder_vocab_size=config["decoder_vocab_size"],
+                encoder_vocab_size=config["encoder_vocab_size"],
                 hidden_size=config["hidden_size"],
-                num_layers=config["num_layers"],
-                num_heads=config["num_heads"],
+                num_decoder_layers=config["num_decoder_layers"],
+                num_encoder_layers=config["num_encoder_layers"],
+                num_decoder_heads=config["num_decoder_heads"],
+                num_encoder_heads=config["num_encoder_heads"],
                 dropout=config["dropout"]
             )
         )
         model.load_state_dict(state_dict)
 
         return model
-        
-    def forward(
+    
+    def encode(
             self,
-            input_ids: torch.Tensor,
-            encode: bool = True,
-            decode: bool = True,
-            fingerprints: torch.Tensor = None
+            input_tokens: torch.Tensor,
+            graph_distances: torch.Tensor
         ) -> dict[str, torch.Tensor]:
         """
-        Neural net forward pass, if output_ids are provided, calculate loss.
-        If custom attention mask is provided, use that instead of causal mask.
+        Encodes input tokens into a set of fingerprints
+
         Args:
-            input_ids: Input token IDs, size (batch_size, sequence_length)
-            encode: bool, whether to encode the input IDs, default True
-            decode: bool, whether to decode the input IDs, default True
-            fingerprints: torch.Tensor, size (batch_size, sequence_length, hidden_size), optional
+            input_tokens: torch.Tensor, size (batch_size, sequence_length)
+            graph_distances: torch.Tensor, size (batch_size, sequence_length, sequence_length)
+        """
+
+        embedded_tokens = self.encoder_embedding(input_tokens)
+
+        attention_bias = torch.einsum("h, bnm -> bhnm", self.encoder_bias, graph_distances)
+        # Attention bias indices are batch_position, head, target_position, source_position
+        # To incorporate masking, set bias of masked positions (0) to a very large negative value
+        attention_bias[input_tokens == 0] = -1e9
+
+        encoding_outputs = self.encoder(
+            inputs_embeds=embedded_tokens,
+            attention_bias=attention_bias
+        )
+
+        return {"hidden_states": encoding_outputs.hidden_states,
+                "fingerprints": encoding_outputs.last_hidden_state[:, 0]}
+
+    def encode_and_decode(
+            self,
+            encoder_tokens: torch.Tensor,
+            graph_distances: torch.Tensor,
+            decoder_target_tokens: torch.Tensor,
+        ) -> dict[str, torch.Tensor]:
+        """
+        Full forward pass for training, including encoding and decoding.
+
+        Args:
+            encoder_tokens: torch.Tensor, size (batch_size, encoder_sequence_length)
+            graph_distances: torch.Tensor, size (batch_size, encoder_sequence_length, encoder_sequence_length)
+            decoder_target_tokens: torch.Tensor, size (batch_size, decoder_sequence_length)
 
         Returns:
-            dict[str, torch.Tensor]: Dictionary containing "input_ids"
-            also contains "encoding_outputs" and "fingerprints" if encode is True
-            also contains "decoding_outputs" if decode is True
-            also contains "loss" if self.training is True
-
-        Invalid states:
-            Must encode or decode
-            Must either encode or provide fingerprints
+            dict[str, torch.Tensor]: Dictionary containing "loss" and "fingerprints"
         """
-        assert decode or encode, "Must encode or decode"
-        assert encode or fingerprints is not None, "Must either encode or provide fingerprints"
 
-        return_dict = {"input_ids": input_ids}
+        return_dict = {}
 
-        if encode:
-            input_ids_for_encoder = input_ids.clone()
-            input_ids_for_encoder[input_ids == 3] = 2 # Replace <|eos|> with <|split|>
-            embedded_tokens_for_encoder = self.embedding[input_ids_for_encoder] # size (batch_size, sequence_length, hidden_size)
+        encoding_outputs = self.encode(encoder_tokens, graph_distances)
+        fingerprints = encoding_outputs["fingerprints"]
 
-            encoding_outputs = self.model(inputs_embeds=embedded_tokens_for_encoder)
-            return_dict["encoding_outputs"] = encoding_outputs
+        return_dict["fingerprints"] = fingerprints
 
-            # Find indices of <|split|> tokens (token_id == 2)
-            split_positions = (input_ids_for_encoder == 2).nonzero()[:, 1]  # Get sequence positions only
-        
-            # Extract embeddings from final hidden layer at split token positions
-            batch_indices = torch.arange(input_ids.size(0), device=input_ids.device)
-            fingerprints = encoding_outputs.hidden_states[-1][batch_indices, split_positions]  # size (batch_size, hidden_size)
-            return_dict["fingerprints"] = fingerprints
+        embedded_tokens_for_decoder = self.decoder_embedding[decoder_target_tokens] # size (batch_size, sequence_length, hidden_size)
+        embedded_tokens_for_decoder = torch.cat([fingerprints, embedded_tokens_for_decoder], dim=1)
+        decoding_outputs = self.decoder(inputs_embeds=embedded_tokens_for_decoder)
 
-        if decode:
-            input_ids_for_decoder = input_ids.clone()
-            embedded_tokens_for_decoder = self.embedding[input_ids_for_decoder][:, 1:] # size (batch_size, sequence_length, hidden_size)
-            decoding_outputs = self.model(inputs_embeds=embedded_tokens_for_decoder)
-            return_dict["decoding_outputs"] = decoding_outputs
+        # Ignore padding tokens (0) in loss calculation
+        logits = decoding_outputs.hidden_states[-1][:, :-1, :].flatten(0, 1)  # (batch*seq_len, vocab_size) 
+        targets = decoder_target_tokens.flatten(0, 1)  # (batch*seq_len)
+        loss = F.cross_entropy(logits, targets, ignore_index=0)
 
-        if self.training:
-            # Ignore padding tokens (0) in loss calculation
-            logits = decoding_outputs.hidden_states[-1][:, :-1, :].flatten(0, 1)  # (batch*seq_len, vocab_size) 
-            targets = input_ids_for_decoder[:, 1:].flatten(0, 1)  # (batch*seq_len)
-            loss = F.cross_entropy(logits, targets, ignore_index=0)
-            return_dict["loss"] = loss
+        return_dict["loss"] = loss
 
         return return_dict
 
@@ -249,18 +279,88 @@ class SMILESDataset(torch.utils.data.Dataset):
         return len(self.data)
         
     def __getitem__(self, idx):
+        """
+        Get an item from the dataset, which involves processing the SMILES string into
+        encoder and decoder tokens, and a graph distance matrix.
+
+        Args:
+            idx: Index of the item to get
+        
+        Returns:
+            dict: Dictionary containing "encoder_tokens", "graph_distances" and "decoder_target_tokens"
+        """
         smiles = self.data.iloc[idx]['smiles']
         
         # Tokenize
-        encoding = self.tokenizer.encode(
+        decoder_target_tokens = self.tokenizer.encode(
             smiles,
             max_length=self.max_length,
             truncation=True,
             return_tensors='pt'
         )
+
+        # Create RDKit molecule object
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError("Invalid SMILES string")
+    
+        # Get atoms
+        atoms = [atom.GetSymbol() for atom in mol.GetAtoms()]
+        n_atoms = len(atoms)
+
+        # Get non-hydrogen atoms
+        atoms = []
+        atom_indices = []  # To map new indices to original indices
+        for i, atom in enumerate(mol.GetAtoms()):
+            if atom.GetSymbol() != 'H':
+                atoms.append(atom.GetAtomicNum())
+                atom_indices.append(i)
+    
+        n_atoms = len(atoms)
         
+        # Create adjacency matrix with conductances (1/resistance)
+        conductance_matrix = torch.zeros((n_atoms, n_atoms))
+        for bond in mol.GetBonds():
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+            
+            # Skip if either atom is hydrogen
+            if i not in atom_indices or j not in atom_indices:
+                continue
+            
+            # Map to new indices
+            new_i = atom_indices.index(i)
+            new_j = atom_indices.index(j)
+            
+            # Resistance is 1/bond_order, so conductance is bond_order
+            conductance = float(bond.GetBondTypeAsDouble())
+            conductance_matrix[new_i, new_j] = conductance
+            conductance_matrix[new_j, new_i] = conductance
+
+        for i in range(n_atoms):
+            conductance_matrix[i][i] = -torch.sum(conductance_matrix[i]) + conductance_matrix[i][i]
+
+        pseudoinverse = torch.linalg.pinv(conductance_matrix)
+
+        # Step 3: Compute effective resistances
+        effective_resistances = torch.zeros((n_atoms, n_atoms))
+        for i in range(n_atoms):
+            for j in range(i+1, n_atoms):
+                effective_resistances[i][j] = effective_resistances[j][i] = (
+                    pseudoinverse[i][i] + pseudoinverse[j][j] - 2 * pseudoinverse[i][j]
+                )
+    
+        effective_resistances_with_universal_node = torch.zeros((n_atoms+1, n_atoms+1))
+        effective_resistances_with_universal_node[1:, 1:] = effective_resistances
+
+        atoms_with_universal_node = torch.tensor([1] + atoms)
+
+        device = decoder_target_tokens.device
+
         return {
-            'input_ids': encoding.squeeze(0),
+            "encoder_tokens": atoms_with_universal_node.to(device),
+            "graph_distances": effective_resistances_with_universal_node.to(device),
+            "decoder_target_tokens": encoding.squeeze(0),
         }
     
 def collate_fn(batch: list[dict]) -> dict:
@@ -277,24 +377,33 @@ def collate_fn(batch: list[dict]) -> dict:
     """
 
     output = {
-        'input_ids': [],
+        'encoder_tokens': [],
+        'graph_distances': [],
+        'decoder_target_tokens': []
     }
 
-    max_len = max([len(item['input_ids']) for item in batch]) + 2
-    for item in batch:
-        split_position = len(item['input_ids']) + 1
+    max_encoder_len = max([len(item['encoder_tokens']) for item in batch])
+    max_decoder_len = max([len(item['decoder_target_tokens']) for item in batch]) + 2
+
+    batch_size = len(batch)
+
+    encoder_tokens = torch.zeros(batch_size, max_encoder_len, device=batch[0]['encoder_tokens'].device).type(torch.LongTensor)
+    graph_distances = torch.zeros(batch_size, max_encoder_len, max_encoder_len, device=batch[0]['graph_distances'].device)
+    decoder_target_tokens = torch.zeros(batch_size, max_decoder_len, device=batch[0]['decoder_target_tokens'].device).type(torch.LongTensor)
+
+    for i, item in enumerate(batch):
         # This is the position of the <|split|> token in new_input_ids
-        input_ids = item['input_ids']
-        ids = torch.cat([
-            torch.tensor([1]),
-            input_ids,
-            torch.tensor([2]),
-            torch.zeros(max_len - len(input_ids) - 2, device=input_ids.device)],
-            dim=0).type(torch.LongTensor)
+        encoder_tokens[i, :len(item['encoder_tokens'])] = item['encoder_tokens']
 
-        output['input_ids'].append(ids)
+        graph_distances[i, :len(item['graph_distances']), :len(item['graph_distances'])] = item['graph_distances']
 
-    output['input_ids'] = torch.stack(output['input_ids'])
+        decoder_target_tokens[i, 1:len(item['decoder_target_tokens'])+1] = item['decoder_target_tokens']
+        decoder_target_tokens[i, 0] = 1
+        decoder_target_tokens[i, len(item['decoder_target_tokens'])+1] = 2
+
+    output['encoder_tokens'] = encoder_tokens
+    output['graph_distances'] = graph_distances
+    output['decoder_target_tokens'] = decoder_target_tokens
 
     return output
 

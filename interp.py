@@ -5,7 +5,7 @@ from utils import GatedSparseCrossCoderConfig as GSCConfig
 
 def main():
     generate_data(
-        model_path="results/1.3M-checkpoint-50733/model.safetensors",
+        model_path="results/",
         model_layers = [],
         dataset_path="data/allmolgen_pretrain_data_train.csv",
         output_path="results/1.3M-checkpoint-50733/activations.pt"
