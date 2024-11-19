@@ -12,11 +12,14 @@ def main():
     tokenizer = SMILESTokenizer()
 
     model_config = SMILESTransformerConfig(
-        vocab_size=tokenizer.get_vocab_size(),
+        encoder_vocab_size=100,
+        decoder_vocab_size=tokenizer.get_vocab_size(),
         hidden_size=256,
-        num_layers=8,
-        num_heads=4,
-        dropout=0.1
+        num_encoder_layers=8,
+        num_encoder_heads=4,
+        num_decoder_layers=8,
+        num_decoder_heads=4,
+        dropout=0.1,
     )
 
     model = SMILESTransformer(model_config)
@@ -45,12 +48,12 @@ def main():
         per_device_train_batch_size=64,
         learning_rate=1e-4,
         weight_decay=0.01,
-        logging_dir=os.path.join(output_dir, "logs"),
         logging_steps=100,
         save_strategy="steps",
         save_steps=10000,
         warmup_steps=500,
-        label_smoothing_factor=0.0
+        label_smoothing_factor=0.0,
+        max_grad_norm=1.0
     )
 
     trainer = Trainer(
@@ -61,6 +64,18 @@ def main():
     )
 
     trainer.train()
+    # Get training logs
+    logs = trainer.state.log_history
+    
+    # Extract loss values and steps
+    train_logs = [(log["step"], log["loss"]) for log in logs if "loss" in log]
+    steps, losses = zip(*train_logs)
+    
+    # Save logs to file
+    with open(os.path.join(output_dir, "train_loss.csv"), "w") as f:
+        f.write("step,loss\n")
+        for step, loss in zip(steps, losses):
+            f.write(f"{step},{loss}\n")
 
 if __name__ == "__main__":
     main()

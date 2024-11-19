@@ -7,9 +7,12 @@ import pandas as pd
 import json
 from safetensors.torch import load_file
 from dataclasses import dataclass
+from tqdm import tqdm
 from rdkit import Chem
 import torch.nn as nn
 import torch.nn.functional as F
+
+from model import GraphTransformer, GraphTransformerConfig, Decoder, DecoderConfig
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -128,48 +131,37 @@ class SMILESTransformer(nn.Module):
         self.config = config
 
         # Create config for encoder
-        encoder_config = transformers.BertConfig(
-            vocab_size=self.config.encoder_vocab_size,
+        encoder_config = GraphTransformerConfig(
             hidden_size=self.config.hidden_size,
-            num_hidden_layers=self.config.num_encoder_layers,
-            num_attention_heads=self.config.num_encoder_heads,
-            attention_dropout=self.config.dropout,
-            hidden_dropout=self.config.dropout,
-            position_embedding_type=None,
-            max_position_embeddings=0,
+            num_layers=self.config.num_encoder_layers,
+            num_heads=self.config.num_encoder_heads,
+            dropout=self.config.dropout
         )
         
         # Create config for GPT2
-        decoder_config = transformers.GPT2Config(
-            vocab_size=self.config.decoder_vocab_size,
+        decoder_config = DecoderConfig(
             hidden_size=self.config.hidden_size,
-            num_hidden_layers=self.config.num_decoder_layers,
-            num_attention_heads=self.config.num_decoder_heads,
-            attention_dropout=self.config.dropout,
-            hidden_dropout=self.config.dropout,
-            bos_token_id=1,  # <|bos|> token
-            eos_token_id=3,  # <|eot|> token
-            pad_token_id=0,  # <|pad|> token
-            position_embedding_type="alibi",  # Enable ALiBi
-            max_position_embeddings=512,
-            return_dict_in_generate=True,
-            output_hidden_states=True
+            num_layers=self.config.num_decoder_layers,
+            num_heads=self.config.num_decoder_heads,
+            dropout=self.config.dropout
         )
         
         # Initialize model components
-        self.encoder = transformers.BertModel(encoder_config)
-        self.decoder = transformers.GPT2Model(decoder_config)
+        self.encoder = GraphTransformer(encoder_config)
+        self.decoder = Decoder(decoder_config)
 
         # Create the encoder bias terms
         encoder_bias = torch.logspace(0, -3, self.config.num_encoder_heads, base=2)
         self.register_buffer("encoder_bias", encoder_bias)
 
         # Create shared weight tensor for embedding and output
+        embedding_std = 1/np.sqrt(self.config.hidden_size)
+
         self.decoder_embedding = torch.nn.Parameter(torch.empty((self.config.decoder_vocab_size, self.config.hidden_size)))
-        torch.nn.init.normal_(self.decoder_embedding, mean=0.0, std=0.02)
+        torch.nn.init.normal_(self.decoder_embedding, mean=0.0, std=embedding_std)
 
         self.encoder_embedding = torch.nn.Parameter(torch.empty((self.config.encoder_vocab_size, self.config.hidden_size)))
-        torch.nn.init.normal_(self.encoder_embedding, mean=0.0, std=0.02)
+        torch.nn.init.normal_(self.encoder_embedding, mean=0.0, std=embedding_std)
 
     def from_pretrained(model_path: str, config_path: str) -> "SMILESTransformer":
         """
@@ -207,23 +199,20 @@ class SMILESTransformer(nn.Module):
             input_tokens: torch.Tensor, size (batch_size, sequence_length)
             graph_distances: torch.Tensor, size (batch_size, sequence_length, sequence_length)
         """
+        embedded_tokens = self.encoder_embedding[input_tokens]
 
-        embedded_tokens = self.encoder_embedding(input_tokens)
-
-        attention_bias = torch.einsum("h, bnm -> bhnm", self.encoder_bias, graph_distances)
-        # Attention bias indices are batch_position, head, target_position, source_position
-        # To incorporate masking, set bias of masked positions (0) to a very large negative value
-        attention_bias[input_tokens == 0] = -1e9
+        attn_mask = (input_tokens == 0).unsqueeze(-1).expand(-1, -1, input_tokens.shape[1]).to(torch.float) * -1e9
 
         encoding_outputs = self.encoder(
-            inputs_embeds=embedded_tokens,
-            attention_bias=attention_bias
+            x=embedded_tokens,
+            graph_bias=graph_distances,
+            attn_mask=attn_mask
         )
 
         return {"hidden_states": encoding_outputs.hidden_states,
-                "fingerprints": encoding_outputs.last_hidden_state[:, 0]}
+                "fingerprints": encoding_outputs.final_hidden_state[:, 0]}
 
-    def encode_and_decode(
+    def forward(
             self,
             encoder_tokens: torch.Tensor,
             graph_distances: torch.Tensor,
@@ -249,8 +238,10 @@ class SMILESTransformer(nn.Module):
         return_dict["fingerprints"] = fingerprints
 
         embedded_tokens_for_decoder = self.decoder_embedding[decoder_target_tokens] # size (batch_size, sequence_length, hidden_size)
-        embedded_tokens_for_decoder = torch.cat([fingerprints, embedded_tokens_for_decoder], dim=1)
-        decoding_outputs = self.decoder(inputs_embeds=embedded_tokens_for_decoder)
+        embedded_tokens_for_decoder = torch.cat([fingerprints.unsqueeze(1), embedded_tokens_for_decoder], dim=1)
+        decoding_outputs = self.decoder(
+            x=embedded_tokens_for_decoder,
+        )
 
         # Ignore padding tokens (0) in loss calculation
         logits = decoding_outputs.hidden_states[-1][:, :-1, :].flatten(0, 1)  # (batch*seq_len, vocab_size) 
@@ -274,6 +265,9 @@ class SMILESDataset(torch.utils.data.Dataset):
         self.data = pd.read_csv(csv_path)
         self.tokenizer = tokenizer
         self.max_length = max_length
+
+        self.testing_dataset_class = False
+        self.return_none_if_error = True
         
     def __len__(self):
         return len(self.data)
@@ -302,7 +296,14 @@ class SMILESDataset(torch.utils.data.Dataset):
         # Create RDKit molecule object
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
-            raise ValueError("Invalid SMILES string")
+            if self.return_none_if_error:
+                if self.testing_dataset_class:
+                    print(f"Invalid SMILES string: {smiles}")
+                return None
+            raise ValueError(f"Invalid SMILES string: {smiles}")
+        
+        if self.testing_dataset_class:
+            return None
     
         # Get atoms
         atoms = [atom.GetSymbol() for atom in mol.GetAtoms()]
@@ -357,12 +358,14 @@ class SMILESDataset(torch.utils.data.Dataset):
 
         device = decoder_target_tokens.device
 
-        return {
+        return_dict = {
             "encoder_tokens": atoms_with_universal_node.to(device),
             "graph_distances": effective_resistances_with_universal_node.to(device),
-            "decoder_target_tokens": encoding.squeeze(0),
+            "decoder_target_tokens": decoder_target_tokens.squeeze(0),
         }
-    
+
+        return return_dict
+        
 def collate_fn(batch: list[dict]) -> dict:
     """
     Collate function for SMILES dataset
@@ -375,12 +378,11 @@ def collate_fn(batch: list[dict]) -> dict:
     Returns:
         dict: Dictionary of batched data
     """
+    # Remove any None items from the batch
+    while None in batch:
+        batch.remove(None)
 
-    output = {
-        'encoder_tokens': [],
-        'graph_distances': [],
-        'decoder_target_tokens': []
-    }
+    output = {}
 
     max_encoder_len = max([len(item['encoder_tokens']) for item in batch])
     max_decoder_len = max([len(item['decoder_target_tokens']) for item in batch]) + 2
@@ -407,159 +409,6 @@ def collate_fn(batch: list[dict]) -> dict:
 
     return output
 
-
-def get_dataloader(csv_path, tokenizer, batch_size=32, shuffle=True, num_workers=4):
-    """
-    Creates a DataLoader for the SMILES dataset
-    
-    Args:
-        csv_path: Path to CSV file
-        tokenizer: Tokenizer to use
-        batch_size: Batch size for training
-        shuffle: Whether to shuffle the data
-        num_workers: Number of worker processes
-    """
-    dataset = SMILESDataset(csv_path, tokenizer)
-    return torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=True
-    )
-
-
-@dataclass
-class GatedSparseCrossCoderConfig:
-    input_dim: int
-    num_input_layers: int
-    hidden_dim: int
-
-class GatedSparseCrossCoder(nn.Module):
-    """
-    A sparse cross-coder with a gated activation function. Uses L1 regularization on a gate path,
-    and an auxiliary loss to prevent the gate path magnitudes from going to zero.
-    Based on the work of https://arxiv.org/pdf/2404.16014 and https://transformer-circuits.pub/2024/crosscoders/index.html
-    """
-    def __init__(self, config: GatedSparseCrossCoderConfig):
-        """Initializes from GatedSparseCrossCoderConfig"""
-        super(GatedSparseCrossCoder, self).__init__()
-        self.config = config
-
-        W = nn.Parameter(torch.randn(
-            self.config.input_dim, 
-            self.config.num_input_layers,
-            self.config.hidden_dim))
-        
-        W_norms = self.get_l1_norms(W)
-        W_normed = torch.einsum("ild, d -> ild", W, 1/W_norms)
-        
-        self.W_enc = nn.Parameter(W_normed.clone())
-        self.W_dec = nn.Parameter(W_normed.clone())
-        self.b_gate = nn.Parameter(torch.zeros(self.config.hidden_dim))
-        self.b_mag = nn.Parameter(torch.zeros(self.config.hidden_dim))
-        self.r_mag = nn.Parameter(torch.zeros(self.config.hidden_dim))
-
-        self.W_dec.register_hook(self._normalize_W_dec)
-
-    def _normalize_W_dec(self, grad: torch.Tensor|None) -> torch.Tensor|None:
-        """
-        Normalizes the columns of the decoder matrix as these might otherwise go to zero
-        Should normally only be called as a backward hook on W_dec.
-        
-        Args:
-            grad: Gradient of the loss with respect to the decoder matrix (optional)
-        
-        Returns:
-            grad: Gradient of the loss with respect to the decoder matrix (optional)
-        """
-        W_dec_norms = self.get_l1_norms(self.W_dec)
-        self.W_dec = torch.einsum("ild, d -> ild", grad, 1/W_dec_norms)
-        return grad
-
-    @staticmethod
-    def get_l1_norms(W: torch.Tensor) -> torch.Tensor:
-        """
-        Gets the summed l1 norms for a weight matrix.
-
-        Args:
-            W: Weight matrix of shape (input_dim, num_input_layers, hidden_dim)
-        
-        Returns:
-            norms: Summed l1 norms for each hidden dimension of shape (hidden_dim)
-        """
-        norms_per_layer = torch.norm(W, p=1, dim=0)
-        norm_sum = torch.sum(norms_per_layer, dim=1)
-        return norm_sum
-    
-    def encode(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        """
-        Encodes a tensor of shape (batch_size, input_dim, input_layers)
-
-        Args:
-            x: Tensor of shape (batch_size, input_dim)
-        
-        Returns:
-            dict[str, torch.Tensor]: Dictionary containing "activations", "gate_path" and "mag_path"
-        """
-
-        preactivations = torch.einsum("bil, ild -> bd", x, self.W_enc)
-        gate_path = preactivations + self.b_gate
-        mag_path = preactivations * F.exp(self.b_mag) + self.b_mag
-
-        activations = torch.heaviside(gate_path, torch.tensor(0)) * F.relu(mag_path)
-
-        return {"activations": activations, "gate_path": gate_path, "mag_path": mag_path}
-    
-    def decode(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Decodes a tensor of shape (batch_size, hidden_dim)
-
-        Args:
-            x: Tensor of shape (batch_size, hidden_dim)
-        
-        Returns:
-            y: Tensor of shape (batch_size, input_dim, input_layers)
-        """
-        return torch.einsum("bd, dlj -> blj", x, self.W_dec)
-    
-    def forward(self, x: torch.Tensor, target_x: torch.Tensor = None) -> dict[str, torch.Tensor]:
-        """
-        Forward pass
-
-        Args:
-            x: Tensor of shape (batch_size, input_dim, input_layers)
-            target_x: Tensor of shape (batch_size, input_dim, input_layers) (optional)
-
-        Returns:
-            dict[str, torch.Tensor]: Dictionary containing "activations", "reconstruction" and optionally
-            "l2_loss", "l1_loss", "aux_loss" if target_x is provided
-        """
-
-        encoding = self.encode(x)
-        activations = encoding["activations"]
-        gate_path = encoding["gate_path"]
-        reconstruction = self.decode(activations)
-
-        if target_x is not None:
-            # All losses calculated as average over batch
-            # L2 loss is just reconstruction loss
-            l2_loss = F.mse_loss(reconstruction, target_x)
-
-            # L1 loss is the average of the product of the gate path and the l1 norms of the decoder weights
-            # Encourages sparsity in the gate path
-            W_dec_l1s = self.get_l1_norms(self.W_dec)
-            l1_loss = torch.mean(W_dec_l1s * gate_path)
-
-            # Auxiliary loss is the average of the mse between the auxiliary reconstruction and the target
-            # This prevents the gate path magnitudes from going to zero due to the l1 loss
-            aux_reconstruction = torch.einsum("bd, dlj -> blj", F.relu(gate_path), self.W_dec.detach())
-            aux_loss = F.mse_loss(aux_reconstruction, target_x)
-
-        return {"activations": encoding["activations"], "reconstruction": reconstruction,
-                "l2_loss": l2_loss, "l1_loss": l1_loss, "aux_loss": aux_loss}
-
-
 def _test_tokenizer():
     tokenizer = SMILESTokenizer()
     print("Encoding CCO:\n", tokenizer.encode("CCO"), "\nShould be [X, X, Y]")
@@ -567,15 +416,25 @@ def _test_tokenizer():
     print("Encoding C(=O)O:\n", tokenizer.encode("C(=O)O"), "\nShould be [A, B, C, D, C]")
     print("Encoding [NH-]:\n", tokenizer.encode("[NH-]"), "\nShould be [N]")
 
-def _test_decoder():
-    decoder = SMILESDecoder(vocab_size=100, hidden_size=256, num_layers=6, num_heads=8, dropout=0.1)
-    mask = decoder.create_causal_mask(1, 10, torch.tensor([5]))
-    print("Creating mask:\n", mask)
+def _test_dataset():
+    tokenizer = SMILESTokenizer()
+    for file_location in [
+        "data/allmolgen_pretrain_data_train.csv",
+        "data/allmolgen_pretrain_data_val.csv",
+        "data/allmolgen_pretrain_data_test.csv"
+    ]:
+        dataset = SMILESDataset(csv_path=file_location, tokenizer=tokenizer)
+        dataset.testing_dataset_class = True
+        print(f"\nTesting {file_location}:")
+        for item in tqdm(dataset, desc="Testing dataset"):
+            _ = item
+
 
 if __name__ == "__main__":
     # Unit test the tokenizer
     # _test_tokenizer()
 
-    # Unit test the decoder
-    #_test_decoder()
+    # Unit test our data processor
+    _test_dataset()
+
     pass
