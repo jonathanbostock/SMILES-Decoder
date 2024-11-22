@@ -266,7 +266,6 @@ class SMILESDataset(torch.utils.data.Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
 
-        self.testing_dataset_class = False
         self.return_none_if_error = True
         
     def __len__(self):
@@ -302,9 +301,6 @@ class SMILESDataset(torch.utils.data.Dataset):
                 return None
             raise ValueError(f"Invalid SMILES string: {smiles}")
         
-        if self.testing_dataset_class:
-            return None
-    
         # Get atoms
         atoms = [atom.GetSymbol() for atom in mol.GetAtoms()]
         n_atoms = len(atoms)

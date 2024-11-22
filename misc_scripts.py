@@ -2,8 +2,6 @@
 
 import pandas as pd
 import numpy as np
-from rdkit import Chem, RDRandom
-from tqdm import tqdm
 
 def main():
     # Create train-validation-test split

@@ -6,6 +6,126 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 
 @dataclass
+class JumpSAEConfig:
+    input_size: int
+    hidden_size: int
+    target_l0: float
+    epsilon: float
+
+@dataclass
+class JumpSAEOutput:
+    feature_activations: torch.Tensor
+    output: torch.Tensor
+    l0: torch.Tensor
+    mse_loss: torch.Tensor
+    l0_loss: torch.Tensor
+
+def heaviside_ste(x: torch.Tensor, epsilon: float = 0.1) -> torch.Tensor:
+    """Heaviside step function with straight-through estimator gradient.
+    
+    Args:
+        x: Input tensor
+        epsilon: Width of the linear region for gradient estimation
+        
+    Returns:
+        Tensor of same shape as input with binary values and STE gradient
+    """
+    # Forward pass: standard heaviside
+    out = (x > 0).float()
+    
+    # Custom gradient within epsilon region
+    if x.requires_grad:
+        mask = (x.abs() < epsilon)
+        grad = torch.zeros_like(x)
+        grad[mask] = 1.0 / (2 * epsilon)
+        
+        # Register custom gradient
+        def backward(grad_output):
+            return grad_output * grad, None
+            
+        x.register_hook(lambda grad_output: backward(grad_output)[0])
+        
+    return out
+
+
+class JumpSAE(nn.Module):
+    def __init__(self, config: JumpSAEConfig):
+        super().__init__()
+        """
+        SAE with JumpReLU activation.
+
+        Args:
+            config: JumpSAEConfig
+        
+        Config args:
+            input_size: Size of the input tensor
+            hidden_size: Size of the hidden layer
+            output_size: Size of the output tensor
+            target_l0: Target L0 regularization parameter
+            epsilon: Width of the linear region for gradient estimation in the STE heaviside function
+
+        Tensors:
+            W_enc: Encoder weight matrix
+            W_dec: Decoder weight matrix
+            b_enc: Encoder bias
+            theta: JumpReLU threshold
+            b_dec: Decoder bias
+        """
+
+        self.config = config
+
+        W_enc_values = self._normalize_rows(torch.randn(config.input_size, config.hidden_size)) * 0.1
+        self.W_enc = nn.Parameter(W_enc_values)
+        self.W_dec = nn.Parameter(W_enc_values.T.clone())
+        self.b_enc = nn.Parameter(torch.zeros(config.hidden_size))
+        self.theta = nn.Parameter(torch.zeros(config.hidden_size))
+        self.b_dec = nn.Parameter(torch.zeros(config.output_size))
+
+    @classmethod
+    def _normalize_rows(cls, x: torch.Tensor) -> torch.Tensor:
+        return x / x.norm(dim=-1, keepdim=True)
+    
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode a tensor using the encoder weight matrix and bias, then apply the JumpReLU activation."""
+        x_cent = x - self.b_dec
+        x_proj = x_cent @ self.W_enc + self.b_enc
+
+        gate_values = heaviside_ste(x_proj - self.theta, self.config.epsilon)
+        mag_values = F.relu(x_proj)
+        activations = gate_values * mag_values
+
+        return {
+            "gate_values": gate_values,
+            "mag_values": mag_values,
+            "activations": activations
+        }
+    
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Decode a tensor using the decoder weight matrix and bias."""
+        return z @ self.W_dec + self.b_dec
+    
+    def forward(self, x: torch.Tensor) -> JumpSAEOutput:
+        """Forward pass for the JumpSAE."""
+        encoding = self.encode(x)
+        z = encoding["activations"]
+        x_recon = self.decode(z)
+
+        # Both losses are averaged over the batch rather than summed
+        l0_loss = F.mse_loss(encoding["gate_values"].sum(dim=-1)/self.config.target_l0 - 1)
+        mse_loss = F.mse_loss(x, x_recon)
+
+        loss = mse_loss + l0_loss
+
+        return JumpSAEOutput(
+            activations=encoding["activations"],
+            output=x_recon,
+            l0=l0_loss,
+            mse=mse_loss,
+            loss=loss
+        )
+
+
+@dataclass
 class GraphTransformerConfig:
     hidden_size: int
     num_layers: int

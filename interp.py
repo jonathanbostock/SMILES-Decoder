@@ -1,33 +1,61 @@
 ### Sparse Autoencoders
-from utils import SMILESTokenizer, SMILESDataset, SMILESDecoder, device
-from utils import GatedSparseCrossCoder as GSC
-from utils import GatedSparseCrossCoderConfig as GSCConfig
+import torch
+import os
+from tqdm import tqdm
+from utils import SMILESTokenizer, SMILESDataset, SMILESTransformer, device, collate_fn
+from model import JumpSAE, JumpSAEConfig
 
 def main():
+
+    """
     generate_data(
-        model_path="results/",
-        model_layers = [],
+        model_path="results/canonical_model",
         dataset_path="data/allmolgen_pretrain_data_train.csv",
-        output_path="results/1.3M-checkpoint-50733/activations.pt"
+        output_path="interp/canonical_activations/",
+        batch_size=512
     )
+    """
 
 def generate_data(
         model_path: str,
-        model_layers: list[str],
         dataset_path: str,
         output_path: str,
+        batch_size: int
     ) -> None:
     """
     Generates a dataset of activations from a trained model.
 
     Args:
         model_path: Path to the trained model
-        model_layers: List of layers to generate activations for
         dataset_path: Path to the dataset to generate activations for
         output_path: Path to save the generated activations
     """
 
-    model = SMILESDecoder.from_pretrained(model_path)
+    model = SMILESTransformer.from_pretrained(
+        model_path=os.path.join(model_path, "canonical_checkpoint/model.safetensors"),
+        config_path=os.path.join(model_path, "config.json")
+    )
+    model.to(device)
+    tokenizer = SMILESTokenizer()
+    dataset = SMILESDataset(
+        csv_path=dataset_path,
+        tokenizer=tokenizer,
+    )
+
+    # Generate activations for training set
+    os.makedirs(os.path.join(output_path, "training"), exist_ok=True)
+    # Don't do more than 1024 iterations, each iteration takes ~4s and generates ~30MB of data
+    iterations = min(1024, len(dataset) // batch_size)
+    for i in tqdm(range(iterations)):
+        batch = collate_fn([dataset.__getitem__(i*batch_size + j) for j in range(batch_size)])
+
+        with torch.no_grad():
+            output = model.encode(
+                batch["encoder_tokens"].to(device),
+               batch["graph_distances"].to(device)
+            )["fingerprints"]
+
+        torch.save(output, f"{output_path}/training/batch_{i}.pt")
 
 if __name__ == "__main__":
     main()
