@@ -1,9 +1,11 @@
 ### Jonathan Bostock 2024-11-19
-
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from safetensors.torch import save_file, load_file
 from dataclasses import dataclass
+import json
 
 @dataclass
 class JumpSAEConfig:
@@ -20,7 +22,7 @@ class JumpSAEOutput:
     mse_loss: torch.Tensor
     l0_loss: torch.Tensor
 
-def heaviside_ste(x: torch.Tensor, epsilon: float = 0.1) -> torch.Tensor:
+def _heaviside_ste(x: torch.Tensor, epsilon: float = 0.1) -> torch.Tensor:
     """Heaviside step function with straight-through estimator gradient.
     
     Args:
@@ -79,7 +81,7 @@ class JumpSAE(nn.Module):
         self.W_dec = nn.Parameter(W_enc_values.T.clone())
         self.b_enc = nn.Parameter(torch.zeros(config.hidden_size))
         self.theta = nn.Parameter(torch.zeros(config.hidden_size))
-        self.b_dec = nn.Parameter(torch.zeros(config.output_size))
+        self.b_dec = nn.Parameter(torch.zeros(config.input_size))
 
     @classmethod
     def _normalize_rows(cls, x: torch.Tensor) -> torch.Tensor:
@@ -90,7 +92,7 @@ class JumpSAE(nn.Module):
         x_cent = x - self.b_dec
         x_proj = x_cent @ self.W_enc + self.b_enc
 
-        gate_values = heaviside_ste(x_proj - self.theta, self.config.epsilon)
+        gate_values = _heaviside_ste(x_proj - self.theta, self.config.epsilon)
         mag_values = F.relu(x_proj)
         activations = gate_values * mag_values
 
@@ -123,6 +125,19 @@ class JumpSAE(nn.Module):
             mse=mse_loss,
             loss=loss
         )
+    
+    def save_pretrained(self, path: str) -> None:
+        """Save the model to a directory"""
+        os.makedirs(path, exist_ok=True)
+        save_file(self.state_dict(), os.path.join(path, "model.safetensors"))
+
+    @classmethod
+    def from_pretrained(cls, path: str) -> "JumpSAE":
+        """Load the model from a directory"""
+        state_dict = load_file(os.path.join(path, "model.safetensors"))
+        model = cls(config=JumpSAEConfig(**json.load(open(os.path.join(path, "config.json")))))
+        model.load_state_dict(state_dict)
+        return model
 
 
 @dataclass

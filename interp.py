@@ -1,8 +1,15 @@
 ### Sparse Autoencoders
 import torch
+from torch.optim import Adam
+from torch.utils.data import DataLoader, Dataset
+from transformers import Trainer, TrainingArguments
 import os
 from tqdm import tqdm
-from utils import SMILESTokenizer, SMILESDataset, SMILESTransformer, device, collate_fn
+import json
+
+from utils.training import SMILESTokenizer, SMILESDataset, SMILESTransformer, device, collate_fn
+from utils.device import device
+from utils.interp import ActivationsDataset
 from model import JumpSAE, JumpSAEConfig
 
 def main():
@@ -17,18 +24,20 @@ def main():
     """
 
     sae_configs = [
-        JumpSAEConfig(input_size=256, hidden_size=hidden_size, target_l0=target_l0)
-        for hidden_size in [1024, 2048, 4096]
-        for target_l0 in [16, 32, 64, 128]
+        JumpSAEConfig(input_size=256, hidden_size=hidden_size, target_l0=target_l0, epsilon=1e-3)
+        for hidden_size in [1024, 2048, 4096][0:1]
+        for target_l0 in [16, 32, 64, 128][0:1]
     ]
 
     train_saes(
+        configs=sae_configs,
         activations_path="interp/canonical_activations/",
-        output_path="results/",
+        output_path="interp/results/",
         batch_size=512
     )
 
 def train_saes(
+    configs: list[JumpSAEConfig],
     activations_path: str,
     output_path: str,
     batch_size: int
@@ -37,17 +46,37 @@ def train_saes(
     Trains sparse autoencoders on a dataset of activations.
     """
     # Create dataloader for activations
-        
     dataset = ActivationsDataset(activations_path)
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
 
+    for config in configs:
+        sae = JumpSAE(config).to(device)
 
+        training_args = TrainingArguments(
+            output_dir=os.path.join(output_path, f"{config.hidden_size}_{config.target_l0}"),
+            num_train_epochs=1,
+            per_device_train_batch_size=batch_size,
+            save_steps=1000,
+            learning_rate=1e-4,
+            weight_decay=0,
+            logging_steps=100,
+            save_strategy="steps"
+        )
+
+        trainer = Trainer(
+            model=sae,
+            args=training_args,
+            train_dataset=dataset,
+            data_collator=collate_fn
+        )
+
+        trainer.train()
+
+        # Save the model
+        os.makedirs(os.path.join(output_path, f"{config.hidden_size}_{config.target_l0}"), exist_ok=True)
+        sae.save_pretrained(os.path.join(output_path, f"{config.hidden_size}_{config.target_l0}"))
+        json.dump(config.model_dump(), open(os.path.join(output_path, f"{config.hidden_size}_{config.target_l0}", "config.json"), "w"))
+        # Save the training logs
+        trainer.save_logs(os.path.join(output_path, f"{config.hidden_size}_{config.target_l0}", "train_logs.json"))
 
 def generate_data(
         model_path: str,

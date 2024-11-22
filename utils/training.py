@@ -12,9 +12,8 @@ from rdkit import Chem
 import torch.nn as nn
 import torch.nn.functional as F
 
+from utils.device import device
 from model import GraphTransformer, GraphTransformerConfig, Decoder, DecoderConfig
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class SMILESTokenizer(transformers.PreTrainedTokenizer):
     def __init__(self):
