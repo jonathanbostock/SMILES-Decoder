@@ -14,14 +14,6 @@ class JumpSAEConfig:
     target_l0: float
     epsilon: float
 
-@dataclass
-class JumpSAEOutput:
-    feature_activations: torch.Tensor
-    output: torch.Tensor
-    l0: torch.Tensor
-    mse_loss: torch.Tensor
-    l0_loss: torch.Tensor
-
 def _heaviside_ste(x: torch.Tensor, epsilon: float = 0.1) -> torch.Tensor:
     """Heaviside step function with straight-through estimator gradient.
     
@@ -76,7 +68,7 @@ class JumpSAE(nn.Module):
 
         self.config = config
 
-        W_enc_values = self._normalize_rows(torch.randn(config.input_size, config.hidden_size)) * 0.1
+        W_enc_values = self._normalize_rows(torch.randn(config.input_size, config.hidden_size))
         self.W_enc = nn.Parameter(W_enc_values)
         self.W_dec = nn.Parameter(W_enc_values.T.clone())
         self.b_enc = nn.Parameter(torch.zeros(config.hidden_size))
@@ -92,9 +84,9 @@ class JumpSAE(nn.Module):
         x_cent = x - self.b_dec
         x_proj = x_cent @ self.W_enc + self.b_enc
 
-        gate_values = _heaviside_ste(x_proj - self.theta, self.config.epsilon)
+        gate_values = _heaviside_ste(x_proj.detach() - self.theta, self.config.epsilon)
         mag_values = F.relu(x_proj)
-        activations = gate_values * mag_values
+        activations = gate_values.detach() * mag_values
 
         return {
             "gate_values": gate_values,
@@ -106,23 +98,25 @@ class JumpSAE(nn.Module):
         """Decode a tensor using the decoder weight matrix and bias."""
         return z @ self.W_dec + self.b_dec
     
-    def forward(self, x: torch.Tensor) -> JumpSAEOutput:
+    def forward(self, x: torch.Tensor) -> dict:
         """Forward pass for the JumpSAE."""
         encoding = self.encode(x)
         z = encoding["activations"]
         x_recon = self.decode(z)
 
         # Both losses are averaged over the batch rather than summed
-        l0_loss = F.mse_loss(encoding["gate_values"].sum(dim=-1)/self.config.target_l0 - 1)
-        mse_loss = F.mse_loss(x, x_recon)
+        mean_l0_value = encoding["gate_values"].sum(dim=-1).mean()
+        l0_loss = (mean_l0_value/self.config.target_l0 - 1)**2
+        mse_loss = ((x - x_recon)**2).mean()
 
         loss = mse_loss + l0_loss
 
-        return JumpSAEOutput(
-            activations=encoding["activations"],
+        return dict(
+            feature_activations=encoding["activations"],
             output=x_recon,
-            l0=l0_loss,
-            mse=mse_loss,
+            mean_l0_value=mean_l0_value,
+            l0_loss=l0_loss,
+            mse_loss=mse_loss,
             loss=loss
         )
     

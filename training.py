@@ -4,7 +4,7 @@ import os
 import json
 import datetime
 
-from utils import SMILESTransformer, SMILESTransformerConfig, SMILESTokenizer, SMILESDataset, collate_fn, device
+from utils.training import SMILESTransformer, SMILESTransformerConfig, SMILESTokenizer, SMILESDataset, collate_fn, device
 from transformers import Trainer, TrainingArguments
 
 def main():

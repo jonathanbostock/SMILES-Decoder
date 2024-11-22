@@ -24,8 +24,7 @@ def main():
     """
 
     sae_configs = [
-        JumpSAEConfig(input_size=256, hidden_size=hidden_size, target_l0=target_l0, epsilon=1e-3)
-        for hidden_size in [1024, 2048, 4096][0:1]
+        JumpSAEConfig(input_size=256, hidden_size=4096, target_l0=target_l0, epsilon=1e-2)
         for target_l0 in [16, 32, 64, 128][0:1]
     ]
 
@@ -33,14 +32,12 @@ def main():
         configs=sae_configs,
         activations_path="interp/canonical_activations/",
         output_path="interp/results/",
-        batch_size=512
     )
 
 def train_saes(
     configs: list[JumpSAEConfig],
     activations_path: str,
     output_path: str,
-    batch_size: int
 ) -> None:
     """
     Trains sparse autoencoders on a dataset of activations.
@@ -49,24 +46,27 @@ def train_saes(
     dataset = ActivationsDataset(activations_path)
 
     for config in configs:
-        sae = JumpSAE(config).to(device)
+        sae = JumpSAE(config)
+        sae.to(device)
 
         training_args = TrainingArguments(
             output_dir=os.path.join(output_path, f"{config.hidden_size}_{config.target_l0}"),
             num_train_epochs=1,
-            per_device_train_batch_size=batch_size,
+            per_device_train_batch_size=1,
             save_steps=1000,
-            learning_rate=1e-4,
+            learning_rate=1e-5,
+            warmup_ratio=0.2,
             weight_decay=0,
             logging_steps=100,
-            save_strategy="steps"
+            save_strategy="steps",
+            dataloader_pin_memory=False
         )
 
         trainer = Trainer(
             model=sae,
             args=training_args,
             train_dataset=dataset,
-            data_collator=collate_fn
+            data_collator = lambda x: {"x": torch.stack(x)}
         )
 
         trainer.train()
