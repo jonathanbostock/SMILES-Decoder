@@ -16,6 +16,39 @@ def main():
     )
     """
 
+    sae_configs = [
+        JumpSAEConfig(input_size=256, hidden_size=hidden_size, target_l0=target_l0)
+        for hidden_size in [1024, 2048, 4096]
+        for target_l0 in [16, 32, 64, 128]
+    ]
+
+    train_saes(
+        activations_path="interp/canonical_activations/",
+        output_path="results/",
+        batch_size=512
+    )
+
+def train_saes(
+    activations_path: str,
+    output_path: str,
+    batch_size: int
+) -> None:
+    """
+    Trains sparse autoencoders on a dataset of activations.
+    """
+    # Create dataloader for activations
+        
+    dataset = ActivationsDataset(activations_path)
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True
+    )
+
+
+
 def generate_data(
         model_path: str,
         dataset_path: str,
