@@ -1,3 +1,4 @@
 data/*.csv
 results/*
 interp/canonical_activations/*
+interp/results/*

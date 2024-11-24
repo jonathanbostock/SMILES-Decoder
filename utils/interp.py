@@ -18,7 +18,7 @@ class ActivationsDataset(Dataset):
         return len(self.batch_files)
             
     def __getitem__(self, idx):
-        batch_path = os.path.join(self.training_path, self.batch_files[idx])
+        batch_path = os.path.join(self.data_path, self.batch_files[idx])
         return torch.load(batch_path, weights_only=True)
 
 class SAETrainer(Trainer):

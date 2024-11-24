@@ -8,6 +8,7 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import json
+import matplotlib.pyplot as plt
 
 from utils.training import SMILESTokenizer, SMILESDataset, SMILESTransformer, device, collate_fn
 from utils.device import device
@@ -16,16 +17,31 @@ from model import JumpSAE, JumpSAEConfig
 
 def main():
 
+    #do_data_generation()
 
+    #do_sae_training()
+
+    #do_sae_testing()
+
+    do_sae_plotting()
+
+def do_data_generation():
     generate_data(
         model_path="results/canonical_model",
-        dataset_path="data/allmolgen_pretrain_data_valid.csv",
-        output_path="interp/canonical_activations/validation/",
+        dataset_path="data/allmolgen_pretrain_data_train.csv",
+        output_path="interp/canonical_activations/training/",
         batch_size=512
+    )
+    generate_data(
+        model_path="results/canonical_model",
+        dataset_path="data/allmolgen_pretrain_data_val.csv",
+        output_path="interp/canonical_activations/validation/",
+        batch_size=512,
+        max_batches=128,
     )
 
 
-    """
+def do_sae_training():
     sae_configs = [
         JumpSAEConfig(input_size=256, hidden_size=4096, target_l0=target_l0, epsilon=1e-2)
         for target_l0 in [16, 32, 64]
@@ -35,15 +51,50 @@ def main():
         activations_path="interp/canonical_activations/",
         output_path="interp/results/",
     )
-    """
-    """
+
+def do_sae_testing():
     test_saes(
         sae_paths=["interp/results/4096_16", "interp/results/4096_32", "interp/results/4096_64"],
-        dataset_path="interp/canonical_activations/validation/",
-        csv_path="data/allmolgen_pretrain_data_valid.csv",
+        dataset_path="interp/canonical_activations/",
+        csv_path="data/allmolgen_pretrain_data_val.csv",
         output_path="interp/results/"
     )
+
+def do_sae_plotting():
+    plot_sae_results(
+        results_path="interp/results/",
+        sae_names=["4096_16", "4096_32", "4096_64"],
+        output_path="interp/results/"
+    )
+
+def plot_sae_results(
+    results_path: str,
+    sae_names: list[str],
+    output_path: str
+) -> None:
     """
+    Plots the results of the SAE testing.
+    """
+    for sae_name in sae_names:
+        fig, ax = plt.subplots(1, 1)
+        with open(os.path.join(results_path, f"{sae_name}.json"), "r") as f:
+            results = json.load(f)
+
+        total_activations = np.array(results["total_activations"])
+        activation_frequencies = total_activations / (128 * 512)
+        # Create logarithmically spaced bins
+        min_freq = activation_frequencies[activation_frequencies > 0].min()
+        max_freq = activation_frequencies.max()
+        bins = np.logspace(np.log10(min_freq), np.log10(max_freq), 50)
+        ax.hist(activation_frequencies, bins=bins, log=True)
+        ax.set_xscale('log')
+        ax.set_xlabel('Frequency of activation')
+        ax.set_ylabel('Number of features')
+        ax.set_title(f'Feature Activation Frequency Distribution\n{sae_name}')
+
+        fig.tight_layout()
+        fig.savefig(os.path.join(output_path, f"{sae_name}_activation_hist.png"))
+        plt.close(fig)
 
 def test_saes(
     sae_paths: list[str],
@@ -64,8 +115,13 @@ def test_saes(
 
     dataset = ActivationsDataset(dataset_path, data_type="validation")
     valid_data_df = pd.read_csv(csv_path)
-    for sae_path in sae_paths:
+
+    for sae_index, sae_path in enumerate(sae_paths):
+        print(f"Testing SAE {sae_index + 1} of {len(sae_paths)}")
+
         sae = JumpSAE.from_pretrained(sae_path)
+        sae.to(device)
+        sae.eval()
 
         mse_list = []
         l0_list = []
@@ -77,11 +133,13 @@ def test_saes(
         
         total_activations = np.zeros(sae.config.hidden_size)
 
-        for batch_index, batch in enumerate(dataset):
-            encoding_dict = sae.encode(batch["x"])
-            activations = encoding_dict["activations"].cpu().numpy()
-            mse = torch.mean((activations - batch["x"])**2).item()
-            l0 = torch.mean(torch.sum(encoding_dict["gate_values"], dim=1)).item()
+        for batch_index, batch in tqdm(enumerate(dataset)):
+            batch = batch.to(device)
+            sae_output = sae(batch)
+            activations = sae_output.feature_activations.detach().cpu().numpy()
+
+            mse = torch.mean((sae_output.output - batch)**2).item()
+            l0 = torch.mean(torch.sum((sae_output.feature_activations > 0).type(torch.float), dim=1)).item()
 
             mse_list.append(mse)
             l0_list.append(l0)
@@ -90,7 +148,8 @@ def test_saes(
             for row_index, row in enumerate(activations):
                 molecule_index = batch_index * 512 + row_index
                 for feature_index, feature in enumerate(row):
-                    if feature > highest_activating_molecule_indices[feature_index]["activation"]:
+                    feature = float(feature)
+                    if feature > highest_activating_molecule_indices[feature_index][-1]["activation"]:
                         # Add the new molecule to the list
                         # Then sort the list (highest to lowest)
                         # Then remove the last element
@@ -98,7 +157,7 @@ def test_saes(
                         highest_activating_molecule_indices[feature_index].sort(key=lambda x: x["activation"], reverse=True)
                         highest_activating_molecule_indices[feature_index] = highest_activating_molecule_indices[feature_index][:10]
 
-            total_activations += np.sum(activations, axis=0)
+            total_activations += np.sum(activations > 0, axis=0)
 
         # Convert highest activating molecules to a dictionary
         for highest_activating_molecule_list in highest_activating_molecule_indices:
@@ -107,16 +166,14 @@ def test_saes(
                 item["molecule_smiles"] = valid_data_df.iloc[item["molecule_index"]]["smiles"]
 
         # Save the results
-        with open(os.path.join(output_path, f"{sae_path}_mse.json"), "w") as f:
+        os.makedirs(output_path, exist_ok=True)
+        with open(os.path.join(output_path, f"{sae.config.hidden_size}_{sae.config.target_l0}.json"), "w") as f:
             json.dump({
-                "average_mse": np.mean(mse_list),
-                "average_l0": np.mean(l0_list),
-                "total_activations": total_activations.tolist(),
+                "average_mse": float(np.mean(mse_list)),
+                "average_l0": float(np.mean(l0_list)),
+                "total_activations": [float(x) for x in total_activations.tolist()],
                 "highest_activating_molecules": highest_activating_molecule_indices
             }, f)
-
-
-
 
 
 def train_saes(
@@ -164,7 +221,8 @@ def generate_data(
         model_path: str,
         dataset_path: str,
         output_path: str,
-        batch_size: int
+        batch_size: int,
+        max_batches: int = 1024
     ) -> None:
     """
     Generates a dataset of activations from a trained model.
@@ -186,10 +244,9 @@ def generate_data(
         tokenizer=tokenizer,
     )
 
-    # Generate activations for training set
+    # Generate activations
     os.makedirs(output_path, exist_ok=True)
-    # Don't do more than 1024 iterations, each iteration takes ~4s and generates ~30MB of data
-    iterations = min(1024, len(dataset) // batch_size)
+    iterations = min(max_batches, len(dataset) // batch_size)
     for i in tqdm(range(iterations)):
         batch = collate_fn([dataset.__getitem__(i*batch_size + j) for j in range(batch_size)])
 
