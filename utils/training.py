@@ -137,7 +137,7 @@ class SMILESTransformer(nn.Module):
             dropout=self.config.dropout
         )
         
-        # Create config for GPT2
+        # Create config for Decoder
         decoder_config = DecoderConfig(
             hidden_size=self.config.hidden_size,
             num_layers=self.config.num_decoder_layers,
@@ -250,6 +250,53 @@ class SMILESTransformer(nn.Module):
         return_dict["loss"] = loss
 
         return return_dict
+    
+    def generate(
+            self,
+            fingerprints: list[torch.Tensor],
+            temperature: float = 1.0,
+        ) -> list[dict[str, str|float|list[int]]]:
+        """
+        Generates SMILES strings from a list of fingerprints
+        """
+
+        return_list = []
+
+        for fingerprint in fingerprints:
+            # Ensure fingerprint is correct shape [1, 1, hidden_size]
+            assert fingerprint.shape == (1, 1, self.config.hidden_size), "Fingerprints must be of shape [1, 1, hidden_size]"
+
+            logits = fingerprint.to(device)
+            total_log_prob = 0
+            next_token = 1
+            tokens = []
+
+            while next_token != 2:
+                logits = torch.cat([logits, self.decoder_embedding[next_token].unsqueeze(0).unsqueeze(0)], dim=1)
+
+                decoder_output = self.decoder(logits)
+                final_hidden_state = decoder_output.final_hidden_state[0, -1]
+                logits = self.decoder_embedding.weight @ final_hidden_state.T
+                
+                if temperature != 0:
+                    probs = F.softmax(logits / temperature, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1).item()
+                else:
+                    next_token = torch.argmax(logits, dim=-1).item()
+
+
+                tokens.append(next_token)
+                total_log_prob += torch.log(probs[0, next_token]).item()
+
+            return_list.append({
+                "smiles": self.tokenizer.decode(tokens),
+                "tokens": tokens,
+                "log_prob": total_log_prob
+            })
+
+        return return_list
+        
+
 
 class SMILESDataset(torch.utils.data.Dataset):
     def __init__(self, csv_path, tokenizer, max_length=512):
