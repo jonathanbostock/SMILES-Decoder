@@ -6,7 +6,7 @@ import numpy as np
 def main():
     # Create train-validation-test split
     data_split(
-        csv_path="data/allmolgen_pretrain_data.csv",
+        csv_path="data/allmolgen_pretrain_data_100maxlen_FIXEDCOLS.csv",
         seed=42,
         test_size=0.1,
         validation_size=0.1
@@ -24,7 +24,7 @@ def data_split(csv_path, seed, test_size, validation_size):
     """
 
     # Read the CSV file
-    df = pd.read_csv(csv_path, index_col=0)
+    df = pd.read_csv(csv_path)
     
     # Set random seed(s)
     np.random.seed(seed)

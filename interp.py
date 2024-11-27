@@ -10,9 +10,9 @@ import pandas as pd
 import json
 import matplotlib.pyplot as plt
 
-from utils.training import SMILESTokenizer, SMILESDataset, SMILESTransformer, device, collate_fn
+from utils.training_utils import SMILESTokenizer, SMILESDataset, SMILESTransformer, collate_fn
 from utils.device import device
-from utils.interp import ActivationsDataset, SAETrainer
+from utils.interp_utils import ActivationsDataset, SAETrainer
 from model import JumpSAE, JumpSAEConfig
 
 def main():
@@ -21,7 +21,7 @@ def main():
 
     #do_sae_training()
 
-    #do_sae_testing()
+    do_sae_testing()
 
     do_sae_plotting()
 
@@ -30,14 +30,15 @@ def do_data_generation():
         model_path="results/canonical_model",
         dataset_path="data/allmolgen_pretrain_data_train.csv",
         output_path="interp/canonical_activations/training/",
-        batch_size=512
+        batch_size=512,
+        max_batches=2048,
     )
     generate_data(
         model_path="results/canonical_model",
         dataset_path="data/allmolgen_pretrain_data_val.csv",
         output_path="interp/canonical_activations/validation/",
         batch_size=512,
-        max_batches=128,
+        max_batches=1024,
     )
 
 
@@ -81,7 +82,7 @@ def plot_sae_results(
             results = json.load(f)
 
         total_activations = np.array(results["total_activations"])
-        activation_frequencies = total_activations / (128 * 512)
+        activation_frequencies = total_activations
         # Create logarithmically spaced bins
         min_freq = activation_frequencies[activation_frequencies > 0].min()
         max_freq = activation_frequencies.max()
@@ -123,6 +124,8 @@ def test_saes(
         sae.to(device)
         sae.eval()
 
+        total_items = 0
+
         mse_list = []
         l0_list = []
 
@@ -159,6 +162,8 @@ def test_saes(
 
             total_activations += np.sum(activations > 0, axis=0)
 
+            total_items += activations.shape[0]
+
         # Convert highest activating molecules to a dictionary
         for highest_activating_molecule_list in highest_activating_molecule_indices:
             for item in highest_activating_molecule_list:
@@ -171,7 +176,7 @@ def test_saes(
             json.dump({
                 "average_mse": float(np.mean(mse_list)),
                 "average_l0": float(np.mean(l0_list)),
-                "total_activations": [float(x) for x in total_activations.tolist()],
+                "total_activations": [float(x) / total_items for x in total_activations.tolist()],
                 "highest_activating_molecules": highest_activating_molecule_indices
             }, f)
 
@@ -234,7 +239,7 @@ def generate_data(
     """
 
     model = SMILESTransformer.from_pretrained(
-        model_path=os.path.join(model_path, "canonical_checkpoint/model.safetensors"),
+        model_path=os.path.join(model_path, "model.safetensors"),
         config_path=os.path.join(model_path, "config.json")
     )
     model.to(device)

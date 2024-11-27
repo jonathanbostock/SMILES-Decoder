@@ -342,8 +342,6 @@ class SMILESDataset(torch.utils.data.Dataset):
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             if self.return_none_if_error:
-                if self.testing_dataset_class:
-                    print(f"Invalid SMILES string: {smiles}")
                 return None
             raise ValueError(f"Invalid SMILES string: {smiles}")
         

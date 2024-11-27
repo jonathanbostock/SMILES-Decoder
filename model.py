@@ -182,7 +182,7 @@ class GraphTransformerLayer(nn.Module):
         self.attn_in_norm = nn.LayerNorm(config.hidden_size)
         self.attn_out_norm = nn.LayerNorm(config.hidden_size)
 
-        self.feed_forward = GEGLU(config)
+        self.feed_forward = BilinearFeedForward(config)
         self.ff_in_norm = nn.LayerNorm(config.hidden_size)
         self.ff_out_norm = nn.LayerNorm(config.hidden_size)
 
@@ -264,7 +264,7 @@ class DecoderLayer(nn.Module):
 
         self.ff_in_norm = nn.LayerNorm(config.hidden_size)
         self.ff_out_norm = nn.LayerNorm(config.hidden_size)
-        self.feed_forward = GEGLU(config)
+        self.feed_forward = BilinearFeedForward(config)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: torch.Tensor, attn_bias: torch.Tensor) -> LayerOutput:
@@ -341,10 +341,10 @@ class BiasedAttention(nn.Module):
         super().__init__()
 
         self.config = config
-        self.W_Q = nn.Linear(config.hidden_size, config.hidden_size)
-        self.W_K = nn.Linear(config.hidden_size, config.hidden_size)
-        self.W_V = nn.Linear(config.hidden_size, config.hidden_size)
-        self.W_O = nn.Linear(config.hidden_size, config.hidden_size)
+        self.W_Q = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.W_K = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.W_V = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        self.W_O = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
 
         self.scale = (config.hidden_size/config.num_heads) ** -0.5
 
@@ -377,3 +377,19 @@ class GEGLU(nn.Module):
         up = self.W_up(x)
         gate = self.W_gate(x)
         return self.W_down(up* F.gelu(gate))
+    
+class BilinearFeedForward(nn.Module):
+    """Bilinear feed forward layer"""
+    def __init__(self, config: DecoderConfig):
+        super().__init__()
+
+        self.config = config
+        self.W_1 = nn.Linear(config.hidden_size, config.hidden_size * 4, bias=False)
+        self.W_2 = nn.Linear(config.hidden_size, config.hidden_size * 4, bias=False)
+        self.W_3 = nn.Linear(config.hidden_size * 4, config.hidden_size, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_1 = self.W_1(x)
+        x_2 = self.W_2(x)
+        x_3 = self.W_3(x_1 * x_2)
+        return x_3

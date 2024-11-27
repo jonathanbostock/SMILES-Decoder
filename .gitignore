@@ -1,4 +1,7 @@
 data/*.csv
+
 results/*
+!results/canonical_model/*
+
 interp/canonical_activations/*
-interp/results/*/*/*
+interp/results/*/*
