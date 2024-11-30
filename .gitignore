@@ -5,3 +5,16 @@ results/*
 
 interp/canonical_activations/*
 interp/results/*/*
+
+# Rust-specific ignores
+rust/target
+rust/Cargo.lock
+
+# Python-specific ignores
+__pycache__/
+*.pyc
+*.pyd
+*.pyo
+
+# Rust-python test ignore
+rust_test.py

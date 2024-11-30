@@ -1,17 +1,48 @@
 ### Jonathan Bostock 2024-11-09
-
 import pandas as pd
 import numpy as np
+from rdkit import Chem
+from tqdm import tqdm
 
 def main():
     # Create train-validation-test split
-    data_split(
-        csv_path="data/allmolgen_pretrain_data_100maxlen_FIXEDCOLS.csv",
-        seed=42,
-        test_size=0.1,
-        validation_size=0.1
-    )
+    csv_path = "data/allmolgen_pretrain_data_100maxlen_FIXEDCOLS.csv"
+    seed = 42
+    test_size = 0.1
+    validation_size = 0.1
+
+    # data_split(csv_path, seed, test_size, validation_size)
+
+    create_graph_vocab(csv_path)
+
     pass
+
+def create_graph_vocab(csv_path):
+    """Create a vocabulary from a CSV file containing graph data"""
+
+    # Read the CSV file
+    df = pd.read_csv(csv_path)
+
+    all_atomic_symbols = set([])
+
+    print("Creating atomic symbol vocabulary...")
+    for smiles in tqdm(df["smiles"]):
+        mol = Chem.MolFromSmiles(smiles)
+
+        if mol is None:
+            continue
+
+        atomic_symbols = set([atom.GetSymbol().lower() for atom in mol.GetAtoms()])
+        all_atomic_symbols.update(atomic_symbols)
+
+    all_atomic_symbols = list(all_atomic_symbols)
+
+    with open("graph_vocab.txt", "w") as f:
+        f.write("<|pad|>\n")
+        f.write("<|unv|>\n")
+        f.write("<|unk|>\n")
+        for atomic_symbol in all_atomic_symbols:
+            f.write(f"{atomic_symbol}\n")
 
 def data_split(csv_path, seed, test_size, validation_size):
     """Split a dataset into train, validation, and test sets, and save to CSV files
@@ -28,7 +59,7 @@ def data_split(csv_path, seed, test_size, validation_size):
     
     # Set random seed(s)
     np.random.seed(seed)
-    
+
     # Get number of samples for each split
     n_samples = len(df)
     n_test = int(n_samples * test_size)

@@ -70,7 +70,7 @@ def main():
     # Extract loss values and steps
     train_logs = [(log["step"], log["loss"]) for log in logs if "loss" in log]
     steps, losses = zip(*train_logs)
-    
+
     # Save logs to file
     with open(os.path.join(output_dir, "train_loss.csv"), "w") as f:
         f.write("step,loss\n")

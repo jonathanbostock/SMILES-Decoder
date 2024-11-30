@@ -1,0 +1,15 @@
+[package]
+name = "smiles_decoder_rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "smiles_decoder_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.19", features = ["extension-module"] }
+petgraph = "0.6"
+ndarray = "0.15"
+nalgebra = "0.32"
+numpy = "0.19"

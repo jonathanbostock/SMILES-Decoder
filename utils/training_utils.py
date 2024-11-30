@@ -15,8 +15,9 @@ import torch.nn.functional as F
 from utils.device import device
 from model import GraphTransformer, GraphTransformerConfig, Decoder, DecoderConfig
 
+"""
 class SMILESTokenizer(transformers.PreTrainedTokenizer):
-    def __init__(self):
+    def __init__(self, vocab_path: str):
         """
         Tokenizer for SMILES strings
         """
@@ -31,7 +32,7 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
         )
         
         # Load the vocabulary from file
-        with open("allmolgen_frag_smiles_vocab.txt", "r") as f:
+        with open(vocab_path, "r") as f:
             vocab = f.read().splitlines()
 
         special_tokens = ["<|pad|>", "<|bos|>", "<|split|>", "<|new|>", "<|eot|>"]
@@ -56,7 +57,7 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
                 current = current[char]
             current['_end_'] = token  # Mark end of token
     
-    def _tokenize(self, text):
+    def _tokenize(self, text: str) -> list[int]:
         """
         Tokenize text using a trie-based approach
         """
@@ -99,6 +100,7 @@ class SMILESTokenizer(transformers.PreTrainedTokenizer):
     
     def _convert_id_to_token(self, index):
         return self.ids_to_tokens.get(index, "<|pad|>")
+"""
 
 @dataclass
 class SMILESTransformerConfig():
