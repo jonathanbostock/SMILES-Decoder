@@ -10,28 +10,39 @@ import pandas as pd
 import json
 import matplotlib.pyplot as plt
 
-from utils.training_utils import SMILESDataset, SMILESTransformer
-from utils.device import device
 from smiles_decoder_rs import SMILESTokenizer, SMILESParser
-from model import JumpSAE, JumpSAEConfig, SmilesTransformer
+from utils.main_utils import get_sae_collate_fn, SAETrainer, SMILESDataset
+from utils.device import device
+from utils.model import JumpSAE, JumpSAEConfig, JumpSAECollection, SMILESTransformer
 
 def main():
 
-    #do_sae_training()
+    do_sae_training()
 
-    do_sae_testing()
+    #do_sae_testing()
 
-    do_sae_plotting()
+    #do_sae_plotting()
 
 
 def do_sae_training():
     sae_configs = [
-        JumpSAEConfig(input_size=256, hidden_size=4096, target_l0=target_l0, epsilon=1e-2)
+        JumpSAEConfig(model_component="residual_post_attn_0",input_size=256, hidden_size=4096, target_l0=target_l0, epsilon=1e-2)
         for target_l0 in [16, 32, 64]
     ]
+    dataset = SMILESDataset(
+        csv_path="data/allmolgen_pretrain_data_100maxlen_FIXEDCOLS_train.csv",
+        tokenizer=SMILESTokenizer("allmolgen_frag_smiles_vocab.txt"),
+        parser=SMILESParser("graph_vocab.txt"),
+        device=device,
+        max_length=512
+    )
     train_saes(
-        configs=sae_configs,
-        activations_path="interp/canonical_activations/",
+        sae_configs=sae_configs,
+        model=SMILESTransformer.from_pretrained(
+            model_path ="results/canonical_model/model.safetensors",
+            config_path="results/canonical_model/config.json"
+        ).to(device),
+        dataset=dataset,
         output_path="interp/results/",
     )
 
@@ -96,7 +107,7 @@ def test_saes(
         output_path: Path to save the results
     """
 
-    dataset = ActivationsDataset(dataset_path, data_type="validation")
+    dataset = SMILESDataset(csv_path, device=device, max_length=512)
     valid_data_df = pd.read_csv(csv_path)
 
     for sae_index, sae_path in enumerate(sae_paths):
@@ -163,6 +174,7 @@ def test_saes(
             }, f)
 
 def train_saes(
+    sae_configs: list[JumpSAEConfig],
     model: SMILESTransformer,
     dataset: SMILESDataset,
     output_path: str
@@ -171,14 +183,29 @@ def train_saes(
     Trains sparse autoencoders on a dataset of activations.
     """
 
-    def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-        encoder_input_ids = torch.stack([item["encoder_tokens"] for item in batch])
-        graph_bias = torch.stack([item["graph_distances"] for item in batch])
+    collate_fn = get_sae_collate_fn(model)
 
-        encoder_outputs = model.encode(encoder_input_ids, graph_bias)
+    training_args = TrainingArguments(
+        output_dir=output_path,
+        num_train_epochs=1,
+        per_device_train_batch_size=512,
+        learning_rate=1e-4,
+        weight_decay=0.0,
+        logging_steps=100,
+        save_strategy="steps",
+        save_steps=10000,
+        warmup_steps=500,
+        remove_unused_columns=False
+    )
 
+    trainer = SAETrainer(
+        model=JumpSAECollection(sae_configs).to(device),
+        args=training_args,
+        train_dataset=dataset,
+        data_collator=collate_fn
+    )
 
-
+    trainer.train()
 
 
 if __name__ == "__main__":
