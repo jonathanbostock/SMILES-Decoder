@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.device import device
-from model import GraphTransformer, GraphTransformerConfig, Decoder, DecoderConfig
+from model import GraphTransformer, GraphTransformerConfig, Decoder, DecoderConfig, GraphTransformerOutput, DecoderOutput
 from smiles_decoder_rs import SMILESTokenizer, SMILESParser
 
 @dataclass
@@ -105,7 +105,7 @@ class SMILESTransformer(nn.Module):
             self,
             input_tokens: torch.Tensor,
             graph_distances: torch.Tensor
-        ) -> dict[str, torch.Tensor]:
+        ) -> dict[str, GraphTransformerOutput|torch.Tensor]:
         """
         Encodes input tokens into a set of fingerprints
 
@@ -123,8 +123,8 @@ class SMILESTransformer(nn.Module):
             attn_mask=attn_mask
         )
 
-        return {"hidden_states": encoding_outputs.hidden_states,
-                "fingerprints": encoding_outputs.final_hidden_state[:, 0]}
+        return encoding_outputs
+                
 
     def forward(
             self,
@@ -147,9 +147,7 @@ class SMILESTransformer(nn.Module):
         return_dict = {}
 
         encoding_outputs = self.encode(encoder_tokens, graph_distances)
-        fingerprints = encoding_outputs["fingerprints"]
-
-        return_dict["fingerprints"] = fingerprints
+        fingerprints = encoding_outputs.fingerprints
 
         embedded_tokens_for_decoder = self.decoder_embedding[decoder_target_tokens] # size (batch_size, sequence_length, hidden_size)
         embedded_tokens_for_decoder = torch.cat([fingerprints.unsqueeze(1), embedded_tokens_for_decoder], dim=1)

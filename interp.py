@@ -162,48 +162,24 @@ def test_saes(
                 "highest_activating_molecules": highest_activating_molecule_indices
             }, f)
 
-
 def train_saes(
     model: SMILESTransformer,
     dataset: SMILESDataset,
-    configs: list[JumpSAEConfig],
-    output_path: str,
+    output_path: str
 ) -> None:
     """
     Trains sparse autoencoders on a dataset of activations.
     """
-    # Create dataloader for activations
-    dataset = ActivationsDataset(activations_path)
 
-    for config in configs:
-        sae = JumpSAE(config)
-        sae.to(device)
+    def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+        encoder_input_ids = torch.stack([item["encoder_tokens"] for item in batch])
+        graph_bias = torch.stack([item["graph_distances"] for item in batch])
 
-        training_args = TrainingArguments(
-            output_dir=os.path.join(output_path, f"{config.hidden_size}_{config.target_l0}"),
-            num_train_epochs=5,
-            per_device_train_batch_size=1,
-            save_steps=1000,
-            learning_rate=5e-4,
-            weight_decay=0,
-            logging_steps=25,
-            save_strategy="steps",
-            dataloader_pin_memory=False,
-            max_grad_norm=1.0
-        )
+        encoder_outputs = model.encode(encoder_input_ids, graph_bias)
 
-        trainer = SAETrainer(
-            model=sae,
-            args=training_args,
-            train_dataset=dataset,
-            data_collator = lambda x: {"x": torch.stack(x)}
-        )
 
-        trainer.train()
 
-        # Save the model
-        os.makedirs(os.path.join(output_path, f"{config.hidden_size}_{config.target_l0}"), exist_ok=True)
-        sae.save_pretrained(os.path.join(output_path, f"{config.hidden_size}_{config.target_l0}"))
+
 
 if __name__ == "__main__":
     main()
