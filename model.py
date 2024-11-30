@@ -10,6 +10,7 @@ import json
 
 @dataclass
 class JumpSAEConfig:
+    model_component: str
     input_size: int
     hidden_size: int
     target_l0: float
@@ -164,13 +165,18 @@ class GraphTransformerConfig:
 
 @dataclass
 class GraphTransformerOutput:
-    hidden_states: tuple[torch.Tensor]
+    attn_outputs_prelinear: tuple[torch.Tensor]
+    ff_outputs: tuple[torch.Tensor]
+    residuals_post_attn: tuple[torch.Tensor]
+    residuals_post_ff: tuple[torch.Tensor]
     final_hidden_state: torch.Tensor
 
 @dataclass
 class LayerOutput:
     x_post_attn: torch.Tensor
     x_post_ff: torch.Tensor
+    attn_out_prelinear: torch.Tensor
+    ff_out: torch.Tensor
 
 class GraphTransformerLayer(nn.Module):
     def __init__(self, config: GraphTransformerConfig):
@@ -191,14 +197,14 @@ class GraphTransformerLayer(nn.Module):
     def forward(self, x: torch.Tensor, attn_bias: torch.Tensor) -> LayerOutput:
 
         x_normed = self.attn_in_norm(x)
-        attn_out = self.attn_out_norm(self.attention(x_normed, attn_bias))
+        attn_out, attn_out_prelinear = self.attn_out_norm(self.attention(x_normed, attn_bias))
         x_post_attn = x + self.dropout(attn_out)
 
         x_normed_2 = self.ff_in_norm(x_post_attn)
         ff_out = self.ff_out_norm(self.feed_forward(x_normed_2))
         x_post_ff = x_post_attn + self.dropout(ff_out)
 
-        return LayerOutput(x_post_attn=x_post_attn, x_post_ff=x_post_ff)
+        return LayerOutput(x_post_attn=x_post_attn, x_post_ff=x_post_ff, attn_out_prelinear=attn_out_prelinear, ff_out=ff_out)
 
 class GraphTransformer(nn.Module):
     """Custom Graph Transformer because huggingface"""
@@ -225,19 +231,33 @@ class GraphTransformer(nn.Module):
         """
 
         attn_mask_expanded = attn_mask.unsqueeze(1).expand(-1, self.config.num_heads, -1, -1)
-        attn_bias = attn_mask_expanded + torch.einsum("bqk,h->bhqk", graph_bias, self.attn_bias_factors)
+        attn_distance_bias = torch.einsum("bqk,h->bhqk", graph_bias, self.attn_bias_factors)
+        if torch.mean(attn_distance_bias) > 0:
+            attn_distance_bias = attn_distance_bias * -1
 
-        hidden_states = []
+        attn_bias = attn_mask_expanded + attn_distance_bias
+
+        residuals_post_ff = []
+        residuals_post_attn = []
+        attn_outputs_prelinear = []
+        ff_outputs = []
+
         x = self.input_norm(x)
         for layer in self.layers:
             layer_out = layer(x, attn_bias)
             x = layer_out.x_post_ff
-            hidden_states.append(layer_out.x_post_attn)
-            hidden_states.append(layer_out.x_post_ff)
+            residuals_post_ff.append(layer_out.x_post_ff)
+            residuals_post_attn.append(layer_out.x_post_attn)
+            attn_outputs_prelinear.append(layer_out.attn_out_prelinear)
+            ff_outputs.append(layer_out.ff_out)
 
         final_hidden_state = self.output_norm(x)
 
-        return GraphTransformerOutput(hidden_states=tuple(hidden_states), final_hidden_state=final_hidden_state)
+        return GraphTransformerOutput(residuals_post_attn=tuple(residuals_post_attn),
+                                      residuals_post_ff=tuple(residuals_post_ff),
+                                      attn_outputs_prelinear=tuple(attn_outputs_prelinear),
+                                      ff_outputs=tuple(ff_outputs),
+                                      final_hidden_state=final_hidden_state)
     
 @dataclass
 class DecoderConfig:
@@ -249,6 +269,8 @@ class DecoderConfig:
 @dataclass
 class DecoderOutput:
     hidden_states: tuple[torch.Tensor]
+    attn_outputs_prelinear: tuple[torch.Tensor]
+    ff_outputs: tuple[torch.Tensor]
     final_hidden_state: torch.Tensor
 
 class DecoderLayer(nn.Module):
@@ -271,14 +293,14 @@ class DecoderLayer(nn.Module):
         """Forward pass for the decoder layer"""
 
         x_normed = self.attn_in_norm(x)
-        attn_out = self.attn_out_norm(self.attention(x_normed, attn_bias))
+        attn_out, attn_out_prelinear = self.attn_out_norm(self.attention(x_normed, attn_bias))
         x_post_attn = x + self.dropout(attn_out)
 
         x_normed_2 = self.ff_in_norm(x_post_attn)
         ff_out = self.ff_out_norm(self.feed_forward(x_normed_2))
         x_post_ff = x_post_attn + self.dropout(ff_out)
 
-        return LayerOutput(x_post_attn=x_post_attn, x_post_ff=x_post_ff)
+        return LayerOutput(x_post_attn=x_post_attn, x_post_ff=x_post_ff, attn_out_prelinear=attn_out_prelinear, ff_out=ff_out)
 
 class Decoder(nn.Module):
     """Decoder for the SMILES transformer
@@ -319,18 +341,27 @@ class Decoder(nn.Module):
 
         attn_bias = attn_mask + alibi_per_head
 
-        hidden_states = []
+        residuals_post_ff = []
+        residuals_post_attn = []
+        attn_outputs_prelinear = []
+        ff_outputs = []
 
         x = self.input_norm(x)
         for layer in self.layers:
             layer_out = layer(x, attn_bias)
             x = layer_out.x_post_ff
-            hidden_states.append(layer_out.x_post_attn)
-            hidden_states.append(layer_out.x_post_ff)
+            residuals_post_ff.append(layer_out.x_post_ff)
+            residuals_post_attn.append(layer_out.x_post_attn)
+            attn_outputs_prelinear.append(layer_out.attn_out_prelinear)
+            ff_outputs.append(layer_out.ff_out)
 
         final_hidden_state = self.output_norm(x)
 
-        return DecoderOutput(hidden_states=tuple(hidden_states), final_hidden_state=final_hidden_state)
+        return DecoderOutput(residuals_post_attn=tuple(residuals_post_attn),
+                             residuals_post_ff=tuple(residuals_post_ff),
+                             attn_outputs_prelinear=tuple(attn_outputs_prelinear),
+                             ff_outputs=tuple(ff_outputs),
+                             final_hidden_state=final_hidden_state)
 
 class BiasedAttention(nn.Module):
     """
@@ -359,9 +390,9 @@ class BiasedAttention(nn.Module):
         attn = attn + attn_bias
         attn = F.softmax(attn, dim=-1)
 
-        attn_values = torch.einsum("bhqk,bkhd->bqhd", attn, V).flatten(-2,-1)
+        attn_out_prelinear = torch.einsum("bhqk,bkhd->bqhd", attn, V).flatten(-2,-1)
 
-        return self.W_O(attn_values)
+        return self.W_O(attn_out_prelinear), attn_out_prelinear
 
 class GEGLU(nn.Module):
     """GEGLU activation function"""

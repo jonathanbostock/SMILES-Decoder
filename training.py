@@ -11,11 +11,12 @@ from smiles_decoder_rs import SMILESTokenizer, SMILESParser
 
 def main():
 
-    tokenizer = SMILESTokenizer()
+    tokenizer = SMILESTokenizer("allmolgen_frag_smiles_vocab.txt")
+    parser = SMILESParser("graph_vocab.txt")
 
     model_config = SMILESTransformerConfig(
-        encoder_vocab_size=100,
-        decoder_vocab_size=tokenizer.get_vocab_size(),
+        encoder_vocab_size=parser.vocab_size,
+        decoder_vocab_size=tokenizer.vocab_size,
         hidden_size=256,
         num_encoder_layers=8,
         num_encoder_heads=4,
@@ -29,8 +30,10 @@ def main():
     model.to(device)
 
     dataset = SMILESDataset(
-        csv_path="data/allmolgen_pretrain_data_train.csv",
-        tokenizer=tokenizer
+        csv_path="data/allmolgen_pretrain_data_100maxlen_FIXEDCOLS_train.csv",
+        tokenizer=tokenizer,
+        parser=parser,
+        device=device
     )
 
     # Create output directory if it doesn't exist with timestamp and model parameter count
@@ -55,7 +58,8 @@ def main():
         save_steps=10000,
         warmup_steps=500,
         label_smoothing_factor=0.0,
-        max_grad_norm=1.0
+        max_grad_norm=1.0,
+        dataloader_pin_memory=False
     )
 
     trainer = Trainer(

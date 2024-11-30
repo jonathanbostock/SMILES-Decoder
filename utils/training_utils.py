@@ -15,93 +15,6 @@ from utils.device import device
 from model import GraphTransformer, GraphTransformerConfig, Decoder, DecoderConfig
 from smiles_decoder_rs import SMILESTokenizer, SMILESParser
 
-"""
-class SMILESTokenizer(transformers.PreTrainedTokenizer):
-    def __init__(self, vocab_path: str):
-        """
-        Tokenizer for SMILES strings
-        """
-        # Initialize parent class
-        self.vocab = {}
-
-        super().__init__(
-            pad_token="<|pad|>",
-            bos_token="<|bos|>", 
-            eos_token="<|eot|>",
-            model_max_length=512
-        )
-        
-        # Load the vocabulary from file
-        with open(vocab_path, "r") as f:
-            vocab = f.read().splitlines()
-
-        special_tokens = ["<|pad|>", "<|bos|>", "<|split|>", "<|new|>", "<|eot|>"]
-        
-        # Create vocabulary mapping
-        self.vocab = {token: i for i, token in enumerate(special_tokens)}
-        self.vocab.update({token: i + len(special_tokens) for i, token in enumerate(vocab)})
-        
-        # Create reverse mapping
-        self.ids_to_tokens = {v: k for k, v in self.vocab.items()}
-
-        self._build_trie()
-
-    def _build_trie(self):
-        """Build a prefix tree for faster token matching"""
-        self.trie = {}
-        for token in self.vocab:
-            current = self.trie
-            for char in token:
-                if char not in current:
-                    current[char] = {}
-                current = current[char]
-            current['_end_'] = token  # Mark end of token
-    
-    def _tokenize(self, text: str) -> list[int]:
-        """
-        Tokenize text using a trie-based approach
-        """
-        tokens = []
-        i = 0
-        text_len = len(text)
-        
-        while i < text_len:
-            current = self.trie
-            longest_match = None
-            longest_end = i
-            
-            # Follow trie as far as possible from current position
-            j = i
-            while j < text_len and text[j] in current:
-                current = current[text[j]]
-                if '_end_' in current:  # Found a complete token
-                    longest_match = current['_end_']
-                    longest_end = j + 1
-                j += 1
-            
-            if longest_match:  # Use the longest token found
-                tokens.append(longest_match)
-                i = longest_end
-            else:  # No match found, use single character
-                tokens.append(text[i])
-                i += 1
-
-                
-        return tokens
-
-    def get_vocab(self):
-        return self.vocab.copy()
-    
-    def get_vocab_size(self):
-        return len(self.vocab)
-
-    def _convert_token_to_id(self, token):
-        return self.vocab.get(token, self.vocab["<|pad|>"])
-    
-    def _convert_id_to_token(self, index):
-        return self.ids_to_tokens.get(index, "<|pad|>")
-"""
-
 @dataclass
 class SMILESTransformerConfig():
     decoder_vocab_size: int
@@ -360,9 +273,9 @@ class SMILESDataset(torch.utils.data.Dataset):
             return None
 
         return_dict = {
-            "encoder_tokens": torch.tensor(atoms, device=self.device),
-            "graph_distances": torch.tensor(distance_matrix, device=self.device),
-            "decoder_target_tokens": torch.tensor(decoder_target_tokens, device=self.device)
+            "encoder_tokens": torch.tensor(atoms, device=self.device, dtype=torch.long),
+            "graph_distances": torch.tensor(distance_matrix, device=self.device, dtype=torch.float),
+            "decoder_target_tokens": torch.tensor(decoder_target_tokens, device=self.device, dtype=torch.long)
         }
 
         return return_dict

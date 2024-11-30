@@ -183,14 +183,6 @@ impl SMILESTokenizer {
     }
 }
 
-/// A Rust module for interfacing with SMILESDecoder
-#[pymodule]
-fn smiles_decoder_rs(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
-    m.add_class::<SMILESTokenizer>()?;
-    m.add_class::<SMILESParser>()?;
-    Ok(())
-}
-
 /*
 #[derive(Debug)]
 struct Atom {
@@ -232,6 +224,11 @@ impl SMILESParser {
             indices.to_pyarray(py),
             distances.to_pyarray(py)
         ))
+    }
+
+    #[getter]
+    fn get_vocab_size(&self) -> usize {
+        self.atom_dict.len() + 3
     }
 }
 
@@ -359,6 +356,67 @@ impl SMILESParser {
                         prev_atom_idx = Some(current_atom_idx);
                     }
                 },
+                '[' => {
+                    let mut bracket_content = String::new();
+                    let mut bracket_depth = 1;
+                    
+                    while let Some(c) = chars.next() {
+                        match c {
+                            '[' => bracket_depth += 1,
+                            ']' => {
+                                bracket_depth -= 1;
+                                if bracket_depth == 0 { break; }
+                            },
+                            _ => bracket_content.push(c),
+                        }
+                    }
+                    
+                    if bracket_depth > 0 {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>("Unclosed bracket in SMILES"));
+                    }
+                    
+                    // Parse bracket content
+                    let mut symbol = String::new();
+                    let mut chars_iter = bracket_content.chars().peekable();
+                    
+                    // Handle charge and isotope indicators if present
+                    while let Some(c) = chars_iter.next() {
+                        match c {
+                            'A'..='Z' | 'a'..='z' => {
+                                symbol.push(c);
+                                if let Some(&next_c) = chars_iter.peek() {
+                                    if next_c.is_ascii_lowercase() {
+                                        let potential_symbol = format!("{}{}", symbol, next_c).to_lowercase();
+                                        if self.atom_dict.contains_key(&potential_symbol) {
+                                            symbol.push(chars_iter.next().unwrap());
+                                        }
+                                    }
+                                }
+                                break;
+                            },
+                            _ => continue, // Skip isotope numbers for now
+                        }
+                    }
+                    
+                    // Add node to graph
+                    graph.add_node(());
+                    current_atom_idx = graph.node_count() - 1;
+                    
+                    // Add atom to list
+                    atoms.push(self.get_atom_index(&symbol));
+                    
+                    // Handle bond from previous atom if it exists
+                    if let Some(prev_idx) = prev_atom_idx {
+                        let bond_order = match next_bond_type.take() {
+                            Some('=') => 2.0,
+                            Some('#') => 3.0,
+                            _ => 1.0,
+                        };
+                        graph.add_edge((prev_idx as u32).into(), (current_atom_idx as u32).into(), bond_order);
+                    }
+                    
+                    prev_atom_idx = Some(current_atom_idx);
+                },
                 '%' => {
                     // Handle ring closures >= 10
                     let digit1 = chars.next()
@@ -377,6 +435,18 @@ impl SMILESParser {
                     let ring_number = c.to_digit(10).unwrap() as usize;
                     self.handle_ring_closure(&mut ring_closures, &mut graph, ring_number,
                                           current_atom_idx, &aromatic_system, next_bond_type.take())?;
+                },
+                '.' => {
+                    // Reset previous atom index since next atom starts a new component
+                    prev_atom_idx = None;
+                    // Clear any pending bond type
+                    next_bond_type = None;
+                },
+                '-' => next_bond_type = Some('-'),  // Explicit single bond
+                '/' | '\\' => {
+                    // For now, treat stereochemistry indicators as single bonds
+                    // TODO: Add proper stereochemistry handling if needed
+                    next_bond_type = Some('-');
                 },
                 _ if c.is_whitespace() => continue,
                 _ => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -405,6 +475,7 @@ impl SMILESParser {
         if let Some((other_atom_idx, other_bond_type, _is_aromatic_start)) = ring_closures.remove(&ring_number) {
             // Close the ring
             let bond_order = match bond_type.or(other_bond_type) {
+                Some('-') => 1.0,
                 Some('=') => 2.0,
                 Some('#') => 3.0,
                 _ if aromatic_system.contains(&current_atom_idx) && 
@@ -425,4 +496,13 @@ impl SMILESParser {
         }
         Ok(())
     }
+}
+
+
+/// A Rust module for interfacing with SMILESTokenizer and SMILESParser
+#[pymodule]
+fn smiles_decoder_rs(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+    m.add_class::<SMILESTokenizer>()?;
+    m.add_class::<SMILESParser>()?;
+    Ok(())
 }

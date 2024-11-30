@@ -10,36 +10,18 @@ import pandas as pd
 import json
 import matplotlib.pyplot as plt
 
-from utils.training_utils import SMILESTokenizer, SMILESDataset, SMILESTransformer, collate_fn
+from utils.training_utils import SMILESDataset, SMILESTransformer
 from utils.device import device
-from utils.interp_utils import ActivationsDataset, SAETrainer
-from model import JumpSAE, JumpSAEConfig
+from smiles_decoder_rs import SMILESTokenizer, SMILESParser
+from model import JumpSAE, JumpSAEConfig, SmilesTransformer
 
 def main():
-
-    #do_data_generation()
 
     #do_sae_training()
 
     do_sae_testing()
 
     do_sae_plotting()
-
-def do_data_generation():
-    generate_data(
-        model_path="results/canonical_model",
-        dataset_path="data/allmolgen_pretrain_data_train.csv",
-        output_path="interp/canonical_activations/training/",
-        batch_size=512,
-        max_batches=2048,
-    )
-    generate_data(
-        model_path="results/canonical_model",
-        dataset_path="data/allmolgen_pretrain_data_val.csv",
-        output_path="interp/canonical_activations/validation/",
-        batch_size=512,
-        max_batches=1024,
-    )
 
 
 def do_sae_training():
@@ -182,8 +164,9 @@ def test_saes(
 
 
 def train_saes(
+    model: SMILESTransformer,
+    dataset: SMILESDataset,
     configs: list[JumpSAEConfig],
-    activations_path: str,
     output_path: str,
 ) -> None:
     """
@@ -221,47 +204,6 @@ def train_saes(
         # Save the model
         os.makedirs(os.path.join(output_path, f"{config.hidden_size}_{config.target_l0}"), exist_ok=True)
         sae.save_pretrained(os.path.join(output_path, f"{config.hidden_size}_{config.target_l0}"))
-
-def generate_data(
-        model_path: str,
-        dataset_path: str,
-        output_path: str,
-        batch_size: int,
-        max_batches: int = 1024
-    ) -> None:
-    """
-    Generates a dataset of activations from a trained model.
-
-    Args:
-        model_path: Path to the trained model
-        dataset_path: Path to the dataset to generate activations for
-        output_path: Path to save the generated activations
-    """
-
-    model = SMILESTransformer.from_pretrained(
-        model_path=os.path.join(model_path, "model.safetensors"),
-        config_path=os.path.join(model_path, "config.json")
-    )
-    model.to(device)
-    tokenizer = SMILESTokenizer()
-    dataset = SMILESDataset(
-        csv_path=dataset_path,
-        tokenizer=tokenizer,
-    )
-
-    # Generate activations
-    os.makedirs(output_path, exist_ok=True)
-    iterations = min(max_batches, len(dataset) // batch_size)
-    for i in tqdm(range(iterations)):
-        batch = collate_fn([dataset.__getitem__(i*batch_size + j) for j in range(batch_size)])
-
-        with torch.no_grad():
-            output = model.encode(
-                batch["encoder_tokens"].to(device),
-               batch["graph_distances"].to(device)
-            )["fingerprints"]
-
-        torch.save(output, f"{output_path}/batch_{i}.pt")
 
 if __name__ == "__main__":
     main()
