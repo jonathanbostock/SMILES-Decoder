@@ -3,9 +3,11 @@ import torch
 import os
 import json
 import datetime
-
-from utils.training_utils import SMILESTransformer, SMILESTransformerConfig, SMILESTokenizer, SMILESDataset, collate_fn, device
 from transformers import Trainer, TrainingArguments
+
+from utils.training_utils import SMILESTransformer, SMILESTransformerConfig, SMILESDataset, collate_fn
+from utils.device import device
+from smiles_decoder_rs import SMILESTokenizer, SMILESParser
 
 def main():
 

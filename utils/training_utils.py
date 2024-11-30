@@ -2,7 +2,6 @@
 
 import numpy as np
 import torch
-import transformers
 import pandas as pd
 import json
 from safetensors.torch import load_file
@@ -14,6 +13,7 @@ import torch.nn.functional as F
 
 from utils.device import device
 from model import GraphTransformer, GraphTransformerConfig, Decoder, DecoderConfig
+from smiles_decoder_rs import SMILESTokenizer, SMILESParser
 
 """
 class SMILESTokenizer(transformers.PreTrainedTokenizer):
@@ -301,20 +301,40 @@ class SMILESTransformer(nn.Module):
 
 
 class SMILESDataset(torch.utils.data.Dataset):
-    def __init__(self, csv_path, tokenizer, max_length=512):
+    def __init__(
+            self,
+            csv_path: str,
+            tokenizer: str|SMILESTokenizer,
+            parser: str|SMILESParser,
+            device: str,
+            max_length:int=512
+        ):
         """
         Dataset for loading SMILES strings from CSV
         
         Args:
             csv_path: Path to CSV file containing SMILES data
             tokenizer: Tokenizer to use for encoding SMILES strings
+            parser: Parser to use for parsing SMILES strings
+            device: Device to use for tensors
             max_length: Maximum sequence length (will pad/truncate)
         """
+
+        if type(tokenizer) == str:
+            self.tokenizer = SMILESTokenizer(vocab_path=tokenizer)
+        else:
+            self.tokenizer = tokenizer
+
+        if type(parser) == str:
+            self.parser = SMILESParser(vocab_path=parser)
+        else:
+            self.parser = parser
+
         self.data = pd.read_csv(csv_path)
-        self.tokenizer = tokenizer
         self.max_length = max_length
 
         self.return_none_if_error = True
+        self.device = device
         
     def __len__(self):
         return len(self.data)
@@ -333,77 +353,16 @@ class SMILESDataset(torch.utils.data.Dataset):
         smiles = self.data.iloc[idx]['smiles']
         
         # Tokenize
-        decoder_target_tokens = self.tokenizer.encode(
-            smiles,
-            max_length=self.max_length,
-            truncation=True,
-            return_tensors='pt'
-        )
+        decoder_target_tokens = self.tokenizer.encode(smiles)
+        atoms, distance_matrix = self.parser.parse(smiles)
 
-        # Create RDKit molecule object
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            if self.return_none_if_error:
-                return None
-            raise ValueError(f"Invalid SMILES string: {smiles}")
-        
-        # Get atoms
-        atoms = [atom.GetSymbol() for atom in mol.GetAtoms()]
-        n_atoms = len(atoms)
-
-        # Get non-hydrogen atoms
-        atoms = []
-        atom_indices = []  # To map new indices to original indices
-        for i, atom in enumerate(mol.GetAtoms()):
-            if atom.GetSymbol() != 'H':
-                atoms.append(atom.GetAtomicNum())
-                atom_indices.append(i)
-    
-        n_atoms = len(atoms)
-        
-        # Create adjacency matrix with conductances (1/resistance)
-        conductance_matrix = torch.zeros((n_atoms, n_atoms))
-        for bond in mol.GetBonds():
-            i = bond.GetBeginAtomIdx()
-            j = bond.GetEndAtomIdx()
-            
-            # Skip if either atom is hydrogen
-            if i not in atom_indices or j not in atom_indices:
-                continue
-            
-            # Map to new indices
-            new_i = atom_indices.index(i)
-            new_j = atom_indices.index(j)
-            
-            # Resistance is 1/bond_order, so conductance is bond_order
-            conductance = float(bond.GetBondTypeAsDouble())
-            conductance_matrix[new_i, new_j] = conductance
-            conductance_matrix[new_j, new_i] = conductance
-
-        for i in range(n_atoms):
-            conductance_matrix[i][i] = -torch.sum(conductance_matrix[i]) + conductance_matrix[i][i]
-
-        pseudoinverse = torch.linalg.pinv(conductance_matrix)
-
-        # Step 3: Compute effective resistances
-        effective_resistances = torch.zeros((n_atoms, n_atoms))
-        for i in range(n_atoms):
-            for j in range(i+1, n_atoms):
-                effective_resistances[i][j] = effective_resistances[j][i] = (
-                    pseudoinverse[i][i] + pseudoinverse[j][j] - 2 * pseudoinverse[i][j]
-                )
-    
-        effective_resistances_with_universal_node = torch.zeros((n_atoms+1, n_atoms+1))
-        effective_resistances_with_universal_node[1:, 1:] = effective_resistances
-
-        atoms_with_universal_node = torch.tensor([1] + atoms)
-
-        device = decoder_target_tokens.device
+        if len(decoder_target_tokens) > self.max_length:
+            return None
 
         return_dict = {
-            "encoder_tokens": atoms_with_universal_node.to(device),
-            "graph_distances": effective_resistances_with_universal_node.to(device),
-            "decoder_target_tokens": decoder_target_tokens.squeeze(0),
+            "encoder_tokens": torch.tensor(atoms, device=self.device),
+            "graph_distances": torch.tensor(distance_matrix, device=self.device),
+            "decoder_target_tokens": torch.tensor(decoder_target_tokens, device=self.device)
         }
 
         return return_dict
