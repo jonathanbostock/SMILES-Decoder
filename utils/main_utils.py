@@ -329,17 +329,24 @@ def get_sae_collate_fn(model: SMILESTransformer) -> Callable:
 
         with torch.no_grad():
             encoder_outputs = model.encode(
-                collated_batch['encoder_tokens'],
-                collated_batch['graph_distances']
+                collated_batch['encoder_tokens'].to(model.device),
+                collated_batch['graph_distances'].to(model.device)
             )
 
-        return encoder_outputs
+        return {"x": encoder_outputs, "input_ids": collated_batch["encoder_tokens"].to(model.device)}
 
     return sae_collate_fn
 
 class SAETrainer(Trainer):
     """Trainer for Sparse Autoencoders, with custom l0 scheduler"""
-    def __init__(self, *, model: JumpSAECollection, args: TrainingArguments, train_dataset: SMILESDataset, data_collator: Callable):
+    def __init__(
+            self, *,
+            model: JumpSAECollection,
+            args: TrainingArguments,
+            train_dataset: SMILESDataset,
+            data_collator: Callable,
+            l0_warmup_fraction: float=0.1
+        ):
         super().__init__(
             model=model,
             args=args,
@@ -349,12 +356,12 @@ class SAETrainer(Trainer):
 
         max_steps = len(train_dataset) * args.num_train_epochs
 
-        self.l0_scheduler = lambda step: min(step / max_steps * 5, 1)
+        self.l0_scheduler = lambda step: min(step / (max_steps * l0_warmup_fraction), 1)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=1):
         outputs = model(**inputs)
-        mse_loss = outputs.mse_loss
-        l0_loss = outputs.l0_loss
+        mse_loss = outputs["mse_loss"]
+        l0_loss = outputs["l0_loss"]
 
         l0_coefficient = self.l0_scheduler(self.state.global_step)
         loss = mse_loss + l0_coefficient * l0_loss

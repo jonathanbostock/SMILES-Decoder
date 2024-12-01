@@ -26,9 +26,13 @@ def main():
 
 def do_sae_training():
     sae_configs = [
-        JumpSAEConfig(model_component="residual_post_attn_0",input_size=256, hidden_size=4096, target_l0=target_l0, epsilon=1e-2)
-        for target_l0 in [16, 32, 64]
+        JumpSAEConfig(model_component=f"residual_post_{component_name}_{i}", input_size=256, hidden_size=4096, target_l0=32, epsilon=1e-2)
+        for i in range(6)
+        for component_name in ("attn", "ff")
+    ] + [
+        JumpSAEConfig(model_component="fingerprints", input_size=256, hidden_size=4096, target_l0=32, epsilon=1e-2)
     ]
+
     dataset = SMILESDataset(
         csv_path="data/allmolgen_pretrain_data_100maxlen_FIXEDCOLS_train.csv",
         tokenizer=SMILESTokenizer("allmolgen_frag_smiles_vocab.txt"),
@@ -36,12 +40,15 @@ def do_sae_training():
         device=device,
         max_length=512
     )
+    transformer = SMILESTransformer.from_pretrained(
+        model_path ="results/canonical_model/model.safetensors",
+        config_path="results/canonical_model/config.json"
+    ).to(device)
+    transformer.eval()
+
     train_saes(
         sae_configs=sae_configs,
-        model=SMILESTransformer.from_pretrained(
-            model_path ="results/canonical_model/model.safetensors",
-            config_path="results/canonical_model/config.json"
-        ).to(device),
+        model=transformer,
         dataset=dataset,
         output_path="interp/results/",
     )
@@ -183,30 +190,35 @@ def train_saes(
     Trains sparse autoencoders on a dataset of activations.
     """
 
-    collate_fn = get_sae_collate_fn(model)
+    sae_collate_fn = get_sae_collate_fn(model)
 
     training_args = TrainingArguments(
         output_dir=output_path,
         num_train_epochs=1,
-        per_device_train_batch_size=512,
-        learning_rate=1e-4,
-        weight_decay=0.0,
+        per_device_train_batch_size=256,
+        learning_rate=5e-5,
+        weight_decay=0,
         logging_steps=100,
         save_strategy="steps",
         save_steps=10000,
         warmup_steps=500,
-        remove_unused_columns=False
+        remove_unused_columns=False,
+        dataloader_pin_memory=False
     )
 
+    model = JumpSAECollection(sae_configs).to(device)
+
     trainer = SAETrainer(
-        model=JumpSAECollection(sae_configs).to(device),
+        model=model,
         args=training_args,
         train_dataset=dataset,
-        data_collator=collate_fn
+        data_collator=sae_collate_fn,
+        l0_warmup_fraction=0.05
     )
 
     trainer.train()
 
+    model.save_pretrained(os.path.join(output_path, "final_saes"))
 
 if __name__ == "__main__":
     main()

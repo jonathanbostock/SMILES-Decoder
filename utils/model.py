@@ -35,17 +35,20 @@ class GraphTransformerOutput:
         output_type = "_".join(key_split[:-1])
 
         match output_type:
-            case "residuals_post_attn":
+            case "residual_post_attn":
                 return self.residuals_post_attn[layer_index]
-            case "residuals_post_ff":
+            case "residual_post_ff":
                 return self.residuals_post_ff[layer_index]
-            case "attn_outputs_prelinear":
+            case "attn_output_prelinear":
                 return self.attn_outputs_prelinear[layer_index]
-            case "ff_outputs":
+            case "ff_output":
                 return self.ff_outputs[layer_index]
             case _:
                 raise IndexError(f"Invalid key: {key}")
-
+            
+    def __len__(self) -> int:
+        # Returns the batch size
+        return self.fingerprints.shape[0]
 
 @dataclass
 class LayerOutput:
@@ -73,12 +76,12 @@ class GraphTransformerLayer(nn.Module):
     def forward(self, x: torch.Tensor, attn_bias: torch.Tensor) -> LayerOutput:
 
         x_normed = self.attn_in_norm(x)
-        attn_out, attn_out_prelinear = self.attn_out_norm(self.attention(x_normed, attn_bias))
-        x_post_attn = x + self.dropout(attn_out)
+        attn_out, attn_out_prelinear = self.attention(x_normed, attn_bias)
+        x_post_attn = x + self.dropout(self.attn_out_norm(attn_out))
 
         x_normed_2 = self.ff_in_norm(x_post_attn)
-        ff_out = self.ff_out_norm(self.feed_forward(x_normed_2))
-        x_post_ff = x_post_attn + self.dropout(ff_out)
+        ff_out = self.feed_forward(x_normed_2)
+        x_post_ff = x_post_attn + self.dropout(self.ff_out_norm(ff_out))
 
         return LayerOutput(x_post_attn=x_post_attn, x_post_ff=x_post_ff, attn_out_prelinear=attn_out_prelinear, ff_out=ff_out)
 
@@ -170,12 +173,12 @@ class DecoderLayer(nn.Module):
         """Forward pass for the decoder layer"""
 
         x_normed = self.attn_in_norm(x)
-        attn_out, attn_out_prelinear = self.attn_out_norm(self.attention(x_normed, attn_bias))
-        x_post_attn = x + self.dropout(attn_out)
+        attn_out, attn_out_prelinear = self.attention(x_normed, attn_bias)
+        x_post_attn = x + self.dropout(self.attn_out_norm(attn_out))
 
         x_normed_2 = self.ff_in_norm(x_post_attn)
-        ff_out = self.ff_out_norm(self.feed_forward(x_normed_2))
-        x_post_ff = x_post_attn + self.dropout(ff_out)
+        ff_out = self.feed_forward(x_normed_2)
+        x_post_ff = x_post_attn + self.dropout(self.ff_out_norm(ff_out))
 
         return LayerOutput(x_post_attn=x_post_attn, x_post_ff=x_post_ff, attn_out_prelinear=attn_out_prelinear, ff_out=ff_out)
 
@@ -267,6 +270,7 @@ class SMILESTransformer(nn.Module):
         super().__init__()
 
         self.config = config
+        self.device = "cpu"
 
         # Create config for encoder
         encoder_config = GraphTransformerConfig(
@@ -300,6 +304,11 @@ class SMILESTransformer(nn.Module):
 
         self.encoder_embedding = torch.nn.Parameter(torch.empty((self.config.encoder_vocab_size, self.config.hidden_size)))
         torch.nn.init.normal_(self.encoder_embedding, mean=0.0, std=embedding_std)
+
+    def to(self, device: str) -> "SMILESTransformer":
+        self.device = device
+        super().to(device)
+        return self
 
     def from_pretrained(model_path: str, config_path: str) -> "SMILESTransformer":
         """
@@ -339,7 +348,7 @@ class SMILESTransformer(nn.Module):
         """
         embedded_tokens = self.encoder_embedding[input_tokens]
 
-        attn_mask = (input_tokens == -2).unsqueeze(-1).expand(-1, -1, input_tokens.shape[1]).to(torch.float) * -1e9
+        attn_mask = ((input_tokens == 0).unsqueeze(-1).expand(-1, -1, input_tokens.shape[1]).to(torch.float) * -1e9).to(input_tokens.device)
 
         encoding_outputs = self.encoder(
             x=embedded_tokens,
@@ -650,18 +659,44 @@ class JumpSAECollection(nn.Module):
 
         self.models = nn.ModuleList([JumpSAE(config) for config in configs])
 
-    def forward(self, x: GraphTransformerOutput|DecoderOutput) -> list[JumpSAEOutput]:
+    def forward(self, x: GraphTransformerOutput|DecoderOutput, input_ids: torch.Tensor) -> dict[str, torch.Tensor]:
         """Run forward pass for the collection of JumpSAEs"""
 
-        outputs = [model(x[model.config.model_component]) for model in self.models]
+        outputs = [self._get_sae_output(model, x, input_ids) for model in self.models]
 
-        mse_loss = torch.sum(torch.stack(map(lambda x: x.mse_loss, outputs)))
-        l0_loss = torch.sum(torch.stack(map(lambda x: x.l0_loss, outputs)))
+        mse_loss = torch.sum(torch.stack(list(map(lambda x: x.mse_loss, outputs))))
+        l0_loss = torch.sum(torch.stack(list(map(lambda x: x.l0_loss, outputs))))
 
-        return mse_loss, l0_loss
-    
+        return {"mse_loss": mse_loss, "l0_loss": l0_loss}
+
+    @staticmethod
+    def _get_sae_output(
+        sae: JumpSAE,
+        x: GraphTransformerOutput|DecoderOutput,
+        input_ids: torch.Tensor
+    ) -> JumpSAEOutput:
+        """Get the output of a single JumpSAE
+
+        Args:
+            sae: JumpSAE
+            x: GraphTransformerOutput or DecoderOutput
+            input_ids: Input IDs
+
+        Returns:
+            JumpSAEOutput
+        """
+
+        component_name = sae.config.model_component
+        output_component = x[component_name]
+
+        if component_name != "fingerprints":
+            output_component = output_component[input_ids != 0]
+
+        return sae(output_component)
+
     def save_pretrained(self, path: str) -> None:
         """Save the model to a directory"""
         os.makedirs(path, exist_ok=True)
-        for i, model in enumerate(self.models):
-            model.save_pretrained(os.path.join(path, f"model_{i}"))
+        for model in self.models:
+            model_name = f"model_{model.config.model_component}_{model.config.target_l0}_{model.config.hidden_size}"
+            model.save_pretrained(os.path.join(path, model_name))
